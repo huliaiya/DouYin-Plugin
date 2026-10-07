@@ -20,14 +20,14 @@ TRSS-Yunzai 抖音适配器插件
 推荐使用 git 进行安装，以方便后续使用 `#抖音bot更新` 升级：
 
 ```bash
-git clone --depth=1 https://github.com/dmmdekkd/DouYin-Plugin.git ./plugins/DouYin-Plugin
+git clone --depth=1 https://github.com/huliaiya/DouYin-Plugin.git ./plugins/DouYin-Plugin
 ```
 
 > [!NOTE]
 > 如果你的网络环境较差，无法连接到 Github，可以使用代理加速下载服务
 >
 > ```bash
-> git clone --depth=1 https://ghproxy.521002.xyz/https://github.com/dmmdekkd/DouYin-Plugin.git ./plugins/DouYin-Plugin
+> git clone --depth=1 https://github.com/huliaiya/DouYin-Plugin.git ./plugins/DouYin-Plugin
 > ```
 
 #### 🔧 安装依赖
