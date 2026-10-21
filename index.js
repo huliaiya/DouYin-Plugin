@@ -4,14 +4,51 @@ import makeConfig from "../../lib/plugins/config.js"
 import QRCode from "qrcode"
 import md5 from "md5"
 import path from "node:path"
-import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { createDecipheriv } from "node:crypto"
+import { Readable } from "node:stream"
 import { fileURLToPath } from "node:url"
 import * as douyin from "douyin.ts"
+import Renderer from "../../lib/renderer/loader.js"
 import { update } from "../other/update.js"
 
 // SDK sendBody 支持 11 种类型（text/image/video/file/emoji/share/userCard/forward/card/location/groupCard）；
 // audio/link/chains 无发送实现，raw 透传时降级为文本
 const sdkSendable = new Set(["text", "image", "video", "file", "emoji", "share", "userCard", "forward", "card", "location", "groupCard"])
+
+// 富文本转义：嵌套合并转发需递归拼 HTML，在 JS 侧生成时防止昵称/文本注入标签
+const escHtml = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]))
+
+// 抖音资源代理：抖音 CDN 直链校验 Referer/Cookie，外部（Chromium 渲染、其它插件）直连会 403；
+// 挂在本机 HTTP 服务下统一补全请求头转发，带 skey 的私有图片/视频在代理内解密后再回吐
+const MEDIA_MOUNTED = Symbol.for("trss.douyin.media.mounted")
+const MEDIA_ROUTE = "/douyin-media"
+// 桌面端 UA：抖音 CDN 同时校验 UA 与 Referer，缺一即 403
+const DESKTOP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+// AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
+function decryptImage(buf, skey) {
+  if (buf.length < 29) return undefined
+  try {
+    const d = createDecipheriv("aes-256-gcm", Buffer.from(skey, "hex"), buf.subarray(0, 12))
+    d.setAuthTag(buf.subarray(buf.length - 16))
+    return Buffer.concat([d.update(buf.subarray(12, buf.length - 16)), d.final()])
+  } catch {
+    return undefined
+  }
+}
+
+// 按魔数识别图片类型（转码档为 WebP，origin 档可能为 HEIC）
+function imageContentType(buf) {
+  const head = buf.subarray(0, 12).toString("hex")
+  if (head.startsWith("ffd8ff")) return "image/jpeg"
+  if (head.startsWith("89504e47")) return "image/png"
+  if (head.startsWith("52494646") && buf.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp"
+  if (buf.subarray(4, 8).toString("latin1") === "ftyp") return "image/heic"
+  if (head.startsWith("474946")) return "image/gif"
+  return "application/octet-stream"
+}
 
 const { config, configSave } = await makeConfig(
   "DouYin",
@@ -24,6 +61,9 @@ const { config, configSave } = await makeConfig(
       autoRead: true,
       // 上报在线状态（对方可见在线）
       activeStatus: true,
+      // 合并转发渲染为图片发送（默认开启）：抖音 forward 卡片需引用会话内真实消息，
+      // 纯生成内容节点无真实消息 id 时预览/展开异常，转图片更稳定；关闭则走 SDK 原生 forward 卡片
+      forwardToImage: true,
     },
     token: [],
   },
@@ -54,6 +94,8 @@ const adapter = new (class DouYinAdapter {
     // 群成员增减去重：notice 与 status 补漏双路径
     this.memberSeen = new Map()
     this.refreshes = {}
+    // 媒体代理路由（全局幂等，仅挂载一次）
+    this.registerResourceProxy()
   }
 
   makeSDKLog(id) {
@@ -69,21 +111,122 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  makeMessageSegs(msg) {
+  // 设备身份落盘路径：与好友/群列表同账号目录
+  deviceFile(id) {
+    return `${this.path}${id}/device.json`
+  }
+
+  // 读取已持久化设备身份（douyin.ts 0.6.6 起支持）；不存在或损坏时返回 undefined，由 SDK 重新注册
+  loadDevice(id) {
+    try {
+      return JSON.parse(readFileSync(this.deviceFile(id), "utf8"))
+    } catch {
+      return undefined
+    }
+  }
+
+  // 持久化设备身份：下次构造/登录注入同一设备，避免每次启动重新注册导致身份不稳定触发二次验证
+  saveDevice(id, device) {
+    if (!device) return
+    try {
+      mkdirSync(path.dirname(this.deviceFile(id)), { recursive: true })
+      writeFileSync(this.deviceFile(id), JSON.stringify(device))
+    } catch (err) {
+      Bot.makeLog("warn", ["设备身份落盘失败", id, err], this.id)
+    }
+  }
+
+  // 资源直链 → 本机代理地址（附目标账号 uin 与可选 skey 供代理内解密）；
+  // 非 http(s)（data URI / base64 / 本地路径）原样返回；已是代理地址不二次包装
+  resourceUrl(url, uin, skey) {
+    if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return url
+    if (url.includes(`${MEDIA_ROUTE}/`)) return url
+    const base = String(Bot.url || "http://localhost:2536").replace(/\/+$/, "")
+    return `${base}${MEDIA_ROUTE}/${uin ?? ""}?u=${encodeURIComponent(url)}${skey ? `&k=${encodeURIComponent(skey)}` : ""}`
+  }
+
+  // 幂等挂载媒体代理路由：按账号 Cookie + Referer 拉取抖音私有资源；
+  // 带 skey 的图片（64 hex，AES-256-GCM）与 CENC 视频（32 hex，AES-128）解密后回吐，其余流式转发
+  registerResourceProxy() {
+    if (globalThis[MEDIA_MOUNTED]) return
+    globalThis[MEDIA_MOUNTED] = true
+    if (!Bot.express.skip_auth.includes(MEDIA_ROUTE)) Bot.express.skip_auth.push(MEDIA_ROUTE)
+    Bot.express.get(`${MEDIA_ROUTE}/:uin`, async (req, res) => {
+      const url = String(req.query.u ?? "")
+      const uin = String(req.params.uin ?? "")
+      if (!/^https?:\/\//i.test(url)) return res.status(400).end("bad url")
+      try {
+        const headers = { Referer: "https://www.douyin.com/", "User-Agent": DESKTOP_UA }
+        const cookie = Bot[uin]?.getCookies?.()
+        if (cookie) headers.Cookie = cookie
+        const upstream = await fetch(url, { headers, redirect: "follow" })
+        if (!upstream.ok) return res.status(upstream.status).end("upstream error")
+        if (!upstream.body) return res.status(502).end("empty upstream")
+        const skey = String(req.query.k ?? "")
+        if (/^[0-9a-f]{64}$/i.test(skey)) {
+          const raw = Buffer.from(await upstream.arrayBuffer())
+          const plain = decryptImage(raw, skey)
+          if (plain) {
+            res.setHeader("Content-Type", imageContentType(plain))
+            res.setHeader("Content-Length", String(plain.length))
+            return res.end(plain)
+          }
+          // 解密失败说明该资源本身是明文，按原样回吐，避免误传 skey 破坏图片
+          res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/octet-stream")
+          res.setHeader("Content-Length", String(raw.length))
+          return res.end(raw)
+        }
+        if (/^[0-9a-f]{32}$/i.test(skey)) {
+          const plain = douyin.decryptCencMp4(new Uint8Array(await upstream.arrayBuffer()), skey)
+          res.setHeader("Content-Type", "video/mp4")
+          res.setHeader("Content-Length", String(plain.length))
+          return res.end(plain)
+        }
+        const type = upstream.headers.get("content-type")
+        const len = upstream.headers.get("content-length")
+        if (type) res.setHeader("Content-Type", type)
+        if (len) res.setHeader("Content-Length", len)
+        Readable.fromWeb(upstream.body).pipe(res)
+      } catch (err) {
+        Bot.makeLog("warn", ["媒体代理失败", url.slice(0, 120), err], uin)
+        if (!res.headersSent) res.status(502).end("proxy error")
+        else res.destroy()
+      }
+    })
+  }
+
+  // 消息 → 消息段数组 + 日志用 raw_message：与 OPQBot/GSUIDCore 接收侧一致，组装 message 段时同步拼接
+  // raw_message，每种消息类型带一个基本信息标记（如 [图片:url] / [视频:摘要] / [文件:名称] / [语音:摘要]），
+  // 日志只打 raw_message，避免把带 resource 的自定义段整体序列化刷屏
+  makeMessageSegs(msg, uin) {
     const message = []
-    for (const i of msg.ats || []) message.push({ type: "at", qq: i.uid })
+    let raw = ""
+    for (const i of msg.ats || []) {
+      message.push({ type: "at", qq: i.uid })
+      raw += `[提及:${i.nickname || i.uid}]`
+    }
 
     switch (msg.type) {
       case "text":
         // 引用消息可能仅携带 refmsg 而无正文（text=""），为空不生成段，避免空气泡
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       case "image": {
         const url =
           msg.image.thumbUrls?.[0] || msg.image.mediumUrls?.[0] || msg.image.largeUrls?.[0] || msg.image.originUrls?.[0]
-        // file 保持 URL 字符串（兼容跨适配器转发），完整资源对象挂 resource 供发侧原样回传
-        if (url) message.push({ type: "image", file: url, resource: msg.image })
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        // 完整资源对象挂 resource 供发侧原样回传；私有图片（带 skey）展示用 file 走代理解密
+        if (url) {
+          const file = msg.image.skey ? this.resourceUrl(url, uin, msg.image.skey) : url
+          message.push({ type: "image", file, resource: msg.image })
+          raw += `[图片:${file}]`
+        }
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       }
       case "video": {
@@ -91,18 +234,23 @@ const adapter = new (class DouYinAdapter {
         if (video?.tkey && video?.skey && video?.md5) {
           // 收侧视频资源齐备时原样透传：SDK 服务端直接引用原视频，poster 内嵌视频体无需单独发封面
           message.push({ type: "video", video })
+          raw += `[视频:${md5(video.tkey)}]`
         } else {
           // 资源缺失无法透传：封面图（如有）+ 播放地址提示文本
           const coverUrl =
             video?.poster?.mediumUrls?.[0] || video?.poster?.thumbUrls?.[0] ||
             video?.poster?.largeUrls?.[0] || video?.poster?.originUrls?.[0]
-          if (coverUrl) message.push({ type: "image", file: coverUrl, resource: video?.poster })
+          if (coverUrl) message.push({ type: "image", file: video?.poster?.skey ? this.resourceUrl(coverUrl, uin, video.poster.skey) : coverUrl, resource: video?.poster })
           else if (video?.inlinePic) message.push({ type: "image", file: `base64://${video.inlinePic}` })
           const playUrl = video?.url?.mainUrl
-          message.push({ type: "text", text: playUrl ? `[视频] ${playUrl}` : "[视频]" })
+          message.push({ type: "text", text: playUrl ? `[视频] ${video?.skey ? this.resourceUrl(playUrl, uin, video.skey) : playUrl}` : "[视频]" })
+          raw += "[视频]"
         }
         // v0.6.2 起 parseBody 不再填充占位 "[视频]"，text 为真实文案或空串，非空才附带
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       }
       case "file": {
@@ -112,30 +260,59 @@ const adapter = new (class DouYinAdapter {
         } else {
           message.push({ type: "text", text: `[文件] ${msg.file?.name || msg.file?.md5 || ""}` })
         }
+        raw += `[文件:${msg.file?.name || msg.file?.md5 || ""}]`
         // v0.6.2 起 parseBody 将文件名直接作为 text（不再填占位 "[文件]"），仅真实文案才附带（当前文件消息无正文）
-        if (msg.text && msg.text !== msg.file?.name) message.push({ type: "text", text: msg.text })
+        if (msg.text && msg.text !== msg.file?.name) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       }
       case "audio":
         // SDK 不支持发送语音、收侧仅有短时签名 URL 无资源对象可透传，降级为文本提示
         message.push({ type: "text", text: "[语音]" })
+        raw += msg.audio?.uri ? `[语音:${md5(msg.audio.uri)}]` : "[语音]"
         // v0.6.2 起 parseBody 不再填充占位 "[语音]"，text 为真实文案或空串，非空才附带
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       case "emoji":
-        if (msg.emoji) message.push({ type: "image", file: msg.emoji })
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        if (msg.emoji) message.push({ type: "image", file: this.resourceUrl(msg.emoji, uin) })
+        raw += msg.emoji ? `[表情:${msg.emoji}]` : "[表情]"
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       case "location":
         if (msg.location) message.push({ type: "location", ...msg.location })
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        raw += `[位置:${msg.location?.name || ""}]`
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
         break
       default:
-        // 卡片等未支持类型透传原始消息体
+        // 卡片/分享/链接/名片/接龙/合并转发/未知等：透传原始消息体，raw 取标题/人数等基本信息概括
         message.push({ type: "raw", data: msg })
-        if (msg.text) message.push({ type: "text", text: msg.text })
+        const label = { forward: "聊天记录", chains: "接龙", link: "链接", share: "分享", userCard: "名片", card: "卡片", groupCard: "群邀请", unknown: "未知消息" }[msg.type] || msg.type
+        const info =
+          msg.groupCard?.groupName ||
+          msg.user?.name ||
+          msg.share?.title ||
+          msg.link?.title ||
+          msg.card?.title ||
+          msg.chains?.description ||
+          (msg.forward ? `${msg.nodes?.length || 0}条` : "")
+        raw += `[${label}${info ? `:${info}` : ""}]`
+        if (msg.text) {
+          message.push({ type: "text", text: msg.text })
+          raw += msg.text
+        }
     }
-    return message
+    return { message, raw }
   }
 
   async makeMsg(data, msg, nested) {
@@ -289,13 +466,20 @@ const adapter = new (class DouYinAdapter {
         case "markdown":
           continue
         case "node": {
-          // 合并转发：收集节点消息体，sendMsg 阶段先真实发送再引用构建 forward 卡片
+          // 合并转发：收集节点消息体；sendMsg 阶段按 config.bot.forwardToImage 决定渲染为图片或走原生 forward 卡片。
+          // bodies 为原生卡片的节点列表（嵌套 forward 保留为单个 forward 节点，不再展平成父节点）；
+          // grouped 保留原节点分组与昵称（转图片时一个节点渲染为一个气泡组，嵌套 forward 递归渲染为内嵌小卡片）
           const bodies = []
-          for (const { message } of i.data)
-            for (const seg of await this.makeMsg(data, message, true))
-              if (seg.type === "forward") bodies.push(...seg.bodies)
-              else bodies.push(seg)
-          if (bodies.length) msgs.push({ type: "forward", bodies })
+          const grouped = []
+          for (const { nickname, uid, user_id, message } of i.data) {
+            const segs = []
+            for (const seg of await this.makeMsg(data, message, true)) {
+              bodies.push(seg)
+              segs.push(seg)
+            }
+            if (segs.length) grouped.push({ name: nickname, uid: uid ?? user_id, segs })
+          }
+          if (bodies.length) msgs.push({ type: "forward", bodies, grouped })
           continue
         }
         case "reply":
@@ -310,7 +494,8 @@ const adapter = new (class DouYinAdapter {
     return msgs
   }
 
-  makeBrief({ type, body, reply }) {
+  makeBrief(seg) {
+    const { type, body, reply } = seg
     let brief = reply ? `[回复:${reply.serverMessageId}]` : ""
     switch (type) {
       case "text":
@@ -346,6 +531,8 @@ const adapter = new (class DouYinAdapter {
         )
       case "location":
         return `${brief}[位置:${body.location.name}]${body.text || ""}`
+      case "forward":
+        return `${brief}[聊天记录:${seg.bodies?.length || 0}条]`
       default:
         return brief + JSON.stringify(body)
     }
@@ -416,40 +603,208 @@ const adapter = new (class DouYinAdapter {
   }
 
   // 发送单条消息体（reply 优先走引用回复），statusCode 非 0 抛错由调用方统一处理
+  // 引用回复透传完整 body：SDK 0.6.7 起支持引用任意类型消息（图片/视频/文件等），@提及/@所有人随 body 一并生效
   async sendBody(data, { reply, body }) {
     const ret = reply
-      ? await data.bot.sdk.msg.reply(data.chatId, reply, body.text, {
-          ...(body.atAll ? { atAll: true } : {}),
-          ...(body.ats?.length ? { ats: body.ats } : {}),
-        })
+      ? await data.bot.sdk.msg.reply(data.chatId, reply, body)
       : await data.bot.sdk.msg.send(data.chatId, body)
     Bot.makeLog("debug", ["发送消息返回", ret], data.self_id)
     if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
     return ret
   }
 
-  // 合并转发：协议要求引用会话内已发送消息，先逐条真实发送节点收集 msgId，
-  // 再组装 forward 卡片，最后撤回节点原消息（群聊无撤回权限会留痕，协议限制）
+  // 合并转发转图片：把节点渲染成「聊天记录」卡片（config.bot.forwardToImage 开启时走此路径）。
+  // 一个节点渲染为一个气泡组：文本→气泡、图片→缩略图、其余类型→标签；嵌套 forward 递归渲染为内嵌「聊天记录」小卡片。
+  // 节点无昵称时统一用当前 bot 昵称。行 HTML 在 JS 侧生成（嵌套需递归，art-template 不便递归）。
+  async renderForward(data, { bodies, grouped }) {
+    const fallback = data.bot.nickname || String(data.self_id)
+    const groups = grouped?.length ? grouped : [{ name: fallback, segs: bodies }]
+    const nodes = await this.buildNodes(data.bot, groups, fallback, data.group_id)
+    const buf = await Renderer.getRenderer().render("DouYinForward", {
+      tplFile: path.join(path.dirname(fileURLToPath(import.meta.url)), "resources", "forward.html"),
+      title: data.group_id ? "群聊的聊天记录" : "聊天记录",
+      desc: `${nodes.length} 条消息`,
+      listHTML: this.nodesHTML(nodes),
+    })
+    if (!buf) throw new Error("合并转发图片渲染失败（Chromium 不可用或模板加载失败）")
+    return buf
+  }
+
+  // 节点分组 → 渲染节点（逐段解析；嵌套 forward 递归构建内层节点）
+  // 头像取发送者真实头像：优先好友/群成员缓存，缺失时按 secUid 批量补全（IM user.info 50/批）；
+  // 无头像时退化为昵称首字彩底
+  async buildNodes(bot, groups, fallback = bot?.nickname || "·", groupId) {
+    const gml = groupId != null ? bot?.gml?.get(String(groupId)) : undefined
+    const cacheOf = uid => bot?.fl?.get(String(uid)) || gml?.get(String(uid)) || {}
+    const secUids = groups.map(g => cacheOf(g.uid)).filter(c => !c.avatar && c.secUid).map(c => c.secUid)
+    const fetched = secUids.length ? await this.fetchUserInfo(bot.uin, secUids) : new Map()
+    const nodes = []
+    for (const g of groups) {
+      const name = g.name || fallback
+      const parts = []
+      for (const seg of g.segs) {
+        const part = await this.renderPart(bot, seg, groupId)
+        if (part) parts.push(part)
+      }
+      if (!parts.length) continue
+      const cache = cacheOf(g.uid)
+      // 节点无 uid（如 Bot.makeForwardArray 生成）时视为 bot 自己发送，头像回退 bot 头像
+      const raw = cache.avatar || fetched.get(cache.secUid)?.avatar || (!g.uid && bot?.avatar)
+      nodes.push({
+        name,
+        avatar: raw || "",
+        initial: [...name][0] || "·",
+        color: this.avatarColor(name),
+        parts,
+      })
+    }
+    return nodes
+  }
+
+  // 节点列表 → HTML（顶层与嵌套共用；嵌套 forward 在 partHTML 中递归展开）
+  nodesHTML(nodes) {
+    return nodes.map(n => this.nodeHTML(n)).join("")
+  }
+
+  nodeHTML({ name, avatar, initial, color, parts }) {
+    const face = avatar
+      ? `<img class="avatar" src="${escHtml(avatar)}" alt="">`
+      : `<div class="avatar" style="background:${escHtml(color)}">${escHtml(initial)}</div>`
+    return (
+      `<div class="row">${face}` +
+      `<div class="content"><div class="name">${escHtml(name)}</div>${parts.map(p => this.partHTML(p)).join("")}</div></div>`
+    )
+  }
+
+  partHTML(part) {
+    switch (part.kind) {
+      case "text":
+        return `<div class="text">${escHtml(part.text)}</div>`
+      case "image":
+        return (
+          `<div class="pic"><img src="${escHtml(part.src)}">${part.tag ? `<span class="badge">${escHtml(part.tag)}</span>` : ""}</div>` +
+          (part.text ? `<div class="cap">${escHtml(part.text)}</div>` : "")
+        )
+      case "forward":
+        return (
+          `<div class="fwd"><div class="fwd-head"><span class="fwd-title">聊天记录</span><span class="fwd-count">${part.count} 条</span></div>` +
+          `<div class="fwd-list">${this.nodesHTML(part.nodes)}</div></div>`
+        )
+      default:
+        return `<div class="chip">${escHtml(part.label)}</div>`
+    }
+  }
+
+  // 昵称 → 头像底色（稳定散列，同一昵称固定同色）
+  avatarColor(name) {
+    const colors = ["#fe2c55", "#ff7a45", "#f5a623", "#52c41a", "#13c2c2", "#1890ff", "#2f54eb", "#722ed1", "#eb2f96"]
+    let h = 0
+    for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) % 99991
+    return colors[h % colors.length]
+  }
+
+  // 单个消息体 → 渲染片段：text 文本气泡 / image 图片缩略图 / forward 内嵌小卡片 / 其他标签
+  async renderPart(bot, seg, groupId) {
+    const { type, body } = seg
+    switch (type) {
+      case "text": {
+        const ats = (body.ats || []).map(i => `@${i.nickname || i.uid}`).join("")
+        const text = (body.atAll ? "@所有人 " : "") + ats + (body.text || "")
+        return text.trim() ? { kind: "text", text } : undefined
+      }
+      case "image": {
+        const src = await this.bodyImageSrc(bot, body.image)
+        if (src) return { kind: "image", src, text: body.text || "" }
+        return { kind: "chip", label: this.makeBrief(seg) }
+      }
+      case "video": {
+        const inline = body.video?.inlinePic
+        const src = (await this.bodyImageSrc(bot, body.video?.poster)) || (inline ? `data:image/jpeg;base64,${inline}` : "")
+        if (src) return { kind: "image", src, tag: "视频" }
+        return { kind: "chip", label: "[视频]" }
+      }
+      case "forward": {
+        // 嵌套合并转发：递归构建内层节点，渲染为内嵌「聊天记录」小卡片
+        const fallback = bot?.nickname || "·"
+        const groups = seg.grouped?.length ? seg.grouped : [{ name: fallback, segs: seg.bodies }]
+        const nodes = await this.buildNodes(bot, groups, fallback, groupId)
+        return nodes.length ? { kind: "forward", count: nodes.length, nodes } : undefined
+      }
+      default:
+        return { kind: "chip", label: this.makeBrief(seg) }
+    }
+  }
+
+  // 图片消息 → 渲染用 src：抖音 CDN 直链直接输出；本机字节/base64/本地路径内联为 data URI
+  async bodyImageSrc(bot, image) {
+    try {
+      if (typeof image === "string") {
+        if (/^https?:\/\//i.test(image)) return image
+      } else if (
+        image &&
+        typeof image === "object" &&
+        !Buffer.isBuffer(image) &&
+        !(image instanceof Uint8Array) &&
+        !(image instanceof ArrayBuffer)
+      ) {
+        const url = image.mediumUrls?.[0] || image.thumbUrls?.[0] || image.largeUrls?.[0] || image.originUrls?.[0] || image.url
+        return url && image.skey ? this.resourceUrl(url, bot?.uin, image.skey) : url || ""
+      }
+      const buf =
+        Buffer.isBuffer(image) || image instanceof Uint8Array || image instanceof ArrayBuffer
+          ? Buffer.from(image)
+          : Buffer.from(await this.mediaSource(image, bot, true))
+      if (!buf.length) return ""
+      const mime = { jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" }[this.detectImgFormat(buf)]
+      return mime ? `data:${mime};base64,${buf.toString("base64")}` : ""
+    } catch (err) {
+      Bot.makeLog("debug", ["合并转发图片渲染跳过", String(err.message || err)], bot?.uin)
+      return ""
+    }
+  }
+
+  // 合并转发转图片发送：渲染失败时回退到 SDK 原生 forward 卡片，避免消息丢失
+  async sendForwardImage(data, { bodies, grouped }, rets) {
+    let image
+    try {
+      image = await this.mediaSource(await this.renderForward(data, { bodies, grouped }), data.bot, true)
+    } catch (err) {
+      Bot.makeLog("warn", ["合并转发转图片失败，回退原生 forward 卡片", err], data.self_id)
+      return this.sendForward(data, { bodies }, rets)
+    }
+    try {
+      Bot.makeLog(
+        "info",
+        `send to ${data.group_id ? `Group(${data.group_id})` : `User(${data.user_id})`}: [合并转发转图片:${bodies.length}条]`,
+        data.self_id,
+      )
+      const ret = await this.sendBody(data, { body: { type: "image", image } })
+      rets.data.push(ret)
+      if (ret.serverMessageId) rets.message_id.push(ret.serverMessageId)
+    } catch (err) {
+      Bot.makeLog("error", ["发送合并转发图片错误", err], data.self_id)
+      if (/HTTP 401|login|auth|登录|expire/i.test(String(err.message || err)))
+        Bot.makeLog("error", `${data.self_id} 登录状态已失效，请使用 #抖音bot登录 重新扫码`, data.self_id)
+      rets.error.push(err)
+    }
+  }
+
+  // 合并转发：直接走 SDK 原生 sendMergeForward（msg.send type=forward）一次组卡发送，
+  // 不再先逐条真发节点再撤回——旧实现会「先发送后撤回」造成闪屏/留痕。
+  // 节点携带真实消息 id（转发真实聊天记录）时直接透传；纯生成内容无真实 id 给占位 id "0"，
+  // 卡片按节点 text 预览渲染。发送失败仅报错，不做降级。
   async sendForward(data, { bodies }, rets) {
     // 节点消息类型映射（7 文本 / 27 图片 / 30 视频 / 136 转发 / 152 接龙，未知给 0）
     const fwdType = { text: [7, 700], image: [27, 2702], video: [30, 0], forward: [136, 0], chains: [152, 0] }
-    const nodes = [],
-      sent = []
     try {
-      for (const seg of bodies) {
-        const ret = await this.sendBody(data, seg)
-        rets.data.push(ret)
-        if (!ret.serverMessageId) throw new Error("节点消息发送失败，无法构建合并转发")
-        sent.push(String(ret.serverMessageId))
-        nodes.push({
-          uid: String(data.self_id),
-          nickname: data.bot.nickname,
-          text: this.makeBrief(seg),
-          msgType: fwdType[seg.type]?.[0] ?? 0,
-          aweType: fwdType[seg.type]?.[1] ?? 0,
-          msgId: String(ret.serverMessageId),
-        })
-      }
+      const nodes = bodies.map(seg => ({
+        uid: String(data.self_id),
+        nickname: data.bot.nickname,
+        text: this.makeBrief(seg),
+        msgType: fwdType[seg.type]?.[0] ?? 0,
+        aweType: fwdType[seg.type]?.[1] ?? 0,
+        msgId: String(seg.msgId ?? seg.serverMessageId ?? "0"),
+      }))
       Bot.makeLog("info", `send to ${data.group_id ? `Group(${data.group_id})` : `User(${data.user_id})`}: [合并转发:${nodes.length}条]`, data.self_id)
       const ret = await data.bot.sdk.msg.send(data.chatId, { type: "forward", nodes })
       rets.data.push(ret)
@@ -461,8 +816,6 @@ const adapter = new (class DouYinAdapter {
         Bot.makeLog("error", `${data.self_id} 登录状态已失效，请使用 #抖音bot登录 重新扫码`, data.self_id)
       rets.error.push(err)
     }
-    for (const msgId of sent)
-      data.bot.sdk.msg.recall(data.chatId, msgId).catch(err => Bot.makeLog("debug", ["合并转发节点撤回失败", msgId, err], data.self_id))
   }
 
   async sendMsg(data, msg) {
@@ -470,7 +823,8 @@ const adapter = new (class DouYinAdapter {
     data.bot.stat.sent_msg_cnt++
     for (const i of await this.makeMsg(data, msg)) {
       if (i.type === "forward") {
-        await this.sendForward(data, i, rets)
+        if (config.bot.forwardToImage) await this.sendForwardImage(data, i, rets)
+        else await this.sendForward(data, i, rets)
         continue
       }
       try {
@@ -557,14 +911,17 @@ const adapter = new (class DouYinAdapter {
 
   async getChatHistory(data, cnt = 20) {
     const history = await data.bot.sdk.chat.history(data.chatId, { count: cnt })
-    return history.map(msg => ({
-      message_id: msg.serverMessageId,
-      user_id: msg.senderUid,
-      time: msg.createTime ? +msg.createTime / 1e6 : undefined,
-      message: this.makeMessageSegs(msg),
-      raw_message: msg.text || "",
-      raw: msg,
-    }))
+    return history.map(msg => {
+      const { message, raw } = this.makeMessageSegs(msg, data.bot?.uin)
+      return {
+        message_id: msg.serverMessageId,
+        user_id: msg.senderUid,
+        time: msg.createTime ? +msg.createTime / 1e6 : undefined,
+        message,
+        raw_message: raw,
+        raw: msg,
+      }
+    })
   }
 
   pickFriend(id, user_id) {
@@ -650,8 +1007,33 @@ const adapter = new (class DouYinAdapter {
       getInfo: async () => {
         const chatId = i.bot.gl.get(group_id)?.chatId
         if (!chatId) return i
-        const members = await i.bot.sdk.grp.members(chatId)
-        return members.find(member => member.uid === user_id) || i
+        const member = (await i.bot.sdk.grp.members(chatId)).find(m => m.uid === user_id)
+        if (!member) return i
+        // 群成员列表（605）不含昵称/头像，用 IM 批量接口按 secUid 补全，并落库 secUid/抖音号供后续读取
+        const [user] = member.secUid ? await i.bot.sdk.user.info([member.secUid]) : []
+        const data = {
+          ...i,
+          ...member,
+          ...(user ? {
+            nickname: user.nickname || i.nickname,
+            avatar: user.avatar || i.avatar,
+            signature: user.signature ?? i.signature,
+            uniqueId: user.uniqueId ?? i.uniqueId,
+            shortId: user.shortId ?? i.shortId,
+          } : {}),
+        }
+        const gml = i.bot.gml.get(group_id)
+        if (gml)
+          await gml.set(user_id, {
+            ...gml.get(user_id),
+            user_id,
+            nickname: data.nickname,
+            secUid: member.secUid,
+            avatar: data.avatar,
+            uniqueId: data.uniqueId,
+            shortId: data.shortId,
+          })
+        return data
       },
       kickOut: async () => {
         const chatId = i.bot.gl.get(group_id)?.chatId
@@ -744,9 +1126,10 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  async loadFriend(id) {
+  // list 可由调用方预取（connect 时复用 cookie 校验阶段的结果），缺省则现拉，避免重复全量翻页
+  async loadFriend(id, list) {
     try {
-      for (const i of await Bot[id].sdk.frd.list())
+      for (const i of list ?? await Bot[id].sdk.frd.list())
         Bot[id].fl.set(i.uid, {
           ...Bot[id].fl.get(i.uid),
           user_id: i.uid,
@@ -766,9 +1149,10 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  async loadGroup(id) {
+  // list 说明同 loadFriend：可复用 cookie 校验阶段已拉取的群列表
+  async loadGroup(id, list) {
     try {
-      for (const i of await Bot[id].sdk.grp.list())
+      for (const i of list ?? await Bot[id].sdk.grp.list())
         if (i.isGroup)
           Bot[id].gl.set(i.conversationShortId, {
             ...Bot[id].gl.get(i.conversationShortId),
@@ -778,7 +1162,44 @@ const adapter = new (class DouYinAdapter {
             chatId: i.chatId,
           })
     } catch (err) {
+      // 群列表同样可能报 unexpected session length（cookie 失效）：与 loadFriend 一致，移除账号并禁止重连
+      if (/session length/i.test(String(err?.message || err))) {
+        this.noReconnect.add(id)
+        await this.removeBot(id)
+        return Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），账号已移除，请使用 #抖音bot登录 重新扫码`, id)
+      }
       Bot.makeLog("error", ["群列表获取错误", err], id)
+    }
+  }
+
+  // 批量拉用户资料（IM user.info，50/批），按 secUid 建索引；失败返回空 Map，不阻断调用方
+  async fetchUserInfo(id, secUids) {
+    const list = [...new Set((secUids || []).filter(Boolean))]
+    if (!list.length) return new Map()
+    const info = await Bot[id].sdk.user.info(list).catch(err => {
+      Bot.makeLog("warn", ["用户资料批量获取失败", err], id)
+      return []
+    })
+    return new Map(info.map(i => [i.secUid, i]))
+  }
+
+  // 批量补全好友缓存的抖音号/短号/签名/头像，落库后插件可直接读 e.bot.pickFriend(uid).uniqueId；
+  // 单次请求覆盖 50 个好友，避免逐个 profileScene 拖慢
+  async enrichFriends(id) {
+    const rows = [...Bot[id].fl.values()].filter(i => i.secUid)
+    if (!rows.length) return
+    const info = await this.fetchUserInfo(id, rows.map(i => i.secUid))
+    for (const row of rows) {
+      const u = info.get(row.secUid)
+      if (!u) continue
+      await Bot[id].fl.set(row.user_id, {
+        ...row,
+        nickname: u.nickname || row.nickname,
+        avatar: u.avatar || row.avatar,
+        signature: u.signature ?? row.signature,
+        uniqueId: u.uniqueId ?? row.uniqueId,
+        shortId: u.shortId ?? row.shortId,
+      })
     }
   }
 
@@ -822,7 +1243,7 @@ const adapter = new (class DouYinAdapter {
     }
     Bot[id].stat.recv_msg_cnt++
 
-    const message = this.makeMessageSegs(msg)
+    const { message, raw: raw_message } = this.makeMessageSegs(msg, id)
     // 空内容消息（引用无正文 / 纯空文本）不构成有效消息，忽略避免空气泡
     if (message.length === 0) {
       Bot[id].stat.recv_msg_cnt--
@@ -851,7 +1272,7 @@ const adapter = new (class DouYinAdapter {
       index_in_conversation: msg.indexInConversation,
       ext: msg.ext,
       message,
-      raw_message: msg.text || "",
+      raw_message,
     }
 
     if (data.message_type === "group") {
@@ -1202,44 +1623,45 @@ const adapter = new (class DouYinAdapter {
       ...config.bot,
       cookie,
       userId: id,
+      // 注入已持久化设备身份（douyin.ts 0.6.6）：跳过设备注册，避免每次启动重新注册导致身份不稳定触发登录二次验证
+      device: this.loadDevice(id),
       log: this.makeSDKLog(id),
     }
 
+    // 登录状态校验前移：先完成登录并做一次轻量 cookie 校验，失效则不注册 Bot[id]，避免失效账号进入在线态
+    const sdk = new douyin.Bot(opts)
+    let self
+    let friends = []
+    let groups = []
+    try {
+      // 设备身份由 SDK 内部注册：未注入 device 时 start() 自动注册，注入（device.json）则跳过
+      await sdk.start()
+      // 取回本次使用的设备身份并落盘，供下次构造/登录复用，避免重复注册
+      this.saveDevice(id, sdk.device)
+      // cookie 校验只用一次「群列表」（原生通道 listNativeGroups）：cookie 失效时首个请求即返回
+      // unexpected session length 并抛错（无重试），秒级失败，账号在注册 Bot[id] 前被挡下；
+      // 校验通过时该结果直接用于群缓存，避免与 loadGroup 重复全量翻页。
+      // 好友列表走 cookie 通道，失效时会静默重试 3 次（约 3s）且异常被 SDK 吞掉，不可靠，
+      // 故仅在群校验通过后再与自身资料一并拉取，且结果同样复用，整体仅拉一次。
+      groups = await sdk.grp.list()
+      ;[friends, self] = await Promise.all([sdk.frd.list(), sdk.user.self()])
+    } catch (err) {
+      const invalid = /session length/i.test(String(err?.message || err))
+      // cookie 失效（session length）时 SDK 反复重试已产生大量 debug 噪音，此处不再重复大堆栈，只提示重登
+      if (!invalid)
+        Bot.makeLog("error", [`${this.name}(${this.id}) ${this.version} 连接失败`, err], id)
+      if (invalid)
+        Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），账号未注册，请使用 #抖音bot登录 重新扫码`, id)
+      this.noReconnect.add(id)
+      sdk.stop()
+      return false
+    }
+    this.noReconnect.delete(id)
+
     Bot[id] = {
       adapter: this,
-      sdk: new douyin.Bot(opts),
-      async login() {
-        // 复用持久化的设备身份（deviceId/installId/guid），避免每次重启重新注册设备导致消息异常（回显自身/他人不可见）
-        const devFile = path.join(this.adapter.path, id, "device.json")
-        let device
-        try {
-          const saved = JSON.parse(readFileSync(devFile, "utf8") || "{}")
-          if (saved.deviceId && saved.installId && saved.guid) device = saved
-        } catch {}
-        if (device) this.sdk.opts.device = device
-        try {
-          await this.sdk.start()
-        } catch (err) {
-          // 持久化设备身份可能已失效：清除后重新注册重试一次
-          if (!device) throw err
-          try { rmSync(devFile, { force: true }) } catch {}
-          delete this.sdk.opts.device
-          await this.sdk.start()
-        }
-        // 登录成功后持久化当前设备身份
-        const ins = this.sdk.httpInstance
-        if (ins?.deviceId && ins?.installId && ins?.guid) {
-          try {
-            mkdirSync(path.dirname(devFile), { recursive: true })
-            writeFileSync(
-              devFile,
-              JSON.stringify({ deviceId: ins.deviceId, installId: ins.installId, guid: ins.guid }, null, 2),
-            )
-          } catch (err) {
-            Bot.makeLog("warn", ["设备身份持久化失败", err], id)
-          }
-        }
-      },
+      sdk,
+      login: () => sdk.start(),
       logout() {
         // 主动登出标记，避免 close 事件触发自动重连
         this.adapter.noReconnect.add(id)
@@ -1250,6 +1672,7 @@ const adapter = new (class DouYinAdapter {
       info: {
         id,
         ...opts,
+        ...self,
       },
       get nickname() {
         return this.info.nickname || this.uin
@@ -1323,24 +1746,6 @@ const adapter = new (class DouYinAdapter {
       replys: {},
     }
 
-    try {
-      await Bot[id].login()
-      Object.assign(Bot[id].info, await Bot[id].sdk.user.self())
-      // cookie 有效性校验：get_by_user_init（好友会话初始化）报 unexpected session length 说明 cookie 失效
-      await Bot[id].sdk.frd.list()
-    } catch (err) {
-      const invalid = /session length/i.test(String(err?.message || err))
-      // cookie 失效（session length）时 SDK 反复重试已产生大量 debug 噪音，此处不再重复大堆栈，只提示重登
-      if (!invalid)
-        Bot.makeLog("error", [`${this.name}(${this.id}) ${this.version} 连接失败`, err], id)
-      if (invalid)
-        Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），已被移除，请使用 #抖音bot登录 重新扫码`, id)
-      this.noReconnect.add(id)
-      await this.removeBot(id)
-      return false
-    }
-    this.noReconnect.delete(id)
-
     // 注册到核心账号列表（Bot.uin.toString 随机取号、Bot.xxx 重定向依赖）；
     // 移至 cookie 校验通过后才注册，避免失效账号进入在线态
     if (!Bot.uin.includes(id)) Bot.uin.push(id)
@@ -1351,7 +1756,6 @@ const adapter = new (class DouYinAdapter {
     Bot[id].sdk.user.heartbeat().catch(err => Bot.makeLog("debug", ["心跳上报失败", err], id))
 
     // 将 SDK 中 Yunzai 未覆盖的 API 挂到 bot 上，插件可通过 e.bot.xxx 直接调用
-    const sdk = Bot[id].sdk
     Object.assign(Bot[id], {
       // msg：输入状态/语音通话/表情回应/已读/编辑
       sendTyping: (chatId, typing) => sdk.msg.sendTyping(chatId, typing),
@@ -1392,6 +1796,8 @@ const adapter = new (class DouYinAdapter {
       // user：资料/在线状态
       getUserProfile: secUid => sdk.user.profileScene(secUid),
       getUserProfileOther: secUid => sdk.user.profileOther(secUid),
+      // 按 secUid 批量查用户资料（昵称/头像/签名/抖音号/关系，50/批），比逐个 profileScene 快
+      getUserInfo: secUids => sdk.user.info(secUids),
       getOnlineStatus: (ids, source) => sdk.user.onlineStatus(ids, source),
       heartbeat: () => sdk.user.heartbeat(),
       activeSwitch: () => sdk.user.activeSwitch(),
@@ -1421,12 +1827,18 @@ const adapter = new (class DouYinAdapter {
 
     Bot.makeLog(
       "debug",
-      ["自动已读", config.bot.autoRead, "在线状态", config.bot.activeStatus],
+      ["自动已读", config.bot.autoRead, "在线状态", config.bot.activeStatus, "合并转发转图片", config.bot.forwardToImage],
       id,
     )
 
-    await this.loadFriend(id)
-    await this.loadGroup(id)
+    // 复用 cookie 校验阶段已拉取的好友/群列表写入缓存，避免二次全量翻页
+    await this.loadFriend(id, friends)
+    await this.loadGroup(id, groups)
+    // 列表拉取阶段 cookie 失效时 loadFriend/loadGroup 内部已移除账号，不再标记已连接
+    if (!Bot[id]) return false
+
+    // 后台批量补全好友抖音号等资料（50/批），不阻塞启动
+    this.enrichFriends(id).catch(err => Bot.makeLog("warn", ["好友资料补全失败", err], id))
 
     // 每 30 分钟全量刷新好友/群列表，防止缓存漂移（先清理旧定时器，避免重连后累积）
     clearInterval(this.refreshes[id])
@@ -1434,6 +1846,7 @@ const adapter = new (class DouYinAdapter {
       if (!Bot[id]) return clearInterval(refresh)
       this.loadFriend(id)
       this.loadGroup(id)
+      this.enrichFriends(id)
     }, 30 * 60000)
     refresh.unref?.()
     this.refreshes[id] = refresh
@@ -1546,6 +1959,9 @@ export class DouYinAdapter extends plugin {
             }, 5 * 60000)
           }),
       })
+
+      // 落盘本次登录使用的设备身份（未注入时由 login 注册），供紧随其后的 connect 复用，避免重复注册触发二次验证
+      adapter.saveDevice(session.userId, session.device)
 
       const token = `${session.userId}:${session.cookie}`
       if (await adapter.connect(token)) {
