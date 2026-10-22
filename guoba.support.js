@@ -10,10 +10,28 @@
 //    否则同样需重启 Bot。文案统一标注"保存后重启 Bot 或等待热重载"。
 
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs"
 
+// 锚定 Bot 根目录而非 process.cwd()，避免 Bot 以非根目录方式启动时
+// 写错 config/DouYin.yaml 与 data/DouYin/connects.json 的路径。
+// guoba.support.js 正常位于 plugins/DouYin/ 下（根标志 lib/plugins、config 在其上两级）；
+// 从自身目录逐级向上找带 lib/plugins 或 config 的目录，找不到则退到上两级，再退到 cwd。
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+function resolveBotRoot() {
+  let dir = __dirname
+  for (let up = 0; up < 6; up++) {
+    if (existsSync(path.join(dir, "lib", "plugins", "config.js")) || existsSync(path.join(dir, "config")))
+      return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return path.resolve(__dirname, "..", "..")
+}
+const botRoot = resolveBotRoot()
 const pluginName = "DouYin"
-const cfgDir = path.join(process.cwd(), "config")
+const cfgDir = path.join(botRoot, "config")
 const cfgFile = path.join(cfgDir, `${pluginName}.yaml`)
 
 // ---- 容错解析 YAML：优先用 yaml，回退 js-yaml，再回退极简内置解析器 ----
@@ -169,7 +187,7 @@ function stringifyYaml(obj) {
 
 function loadConnects() {
   try {
-    const obj = JSON.parse(readFileSync(path.join(process.cwd(), "data", "DouYin", "connects.json"), "utf8"))
+    const obj = JSON.parse(readFileSync(path.join(botRoot, "data", "DouYin", "connects.json"), "utf8"))
     return new Map(Object.entries(obj))
   } catch {
     return new Map()
@@ -280,9 +298,9 @@ export function supportGuoba() {
         {
           field: "bot.timeout",
           label: "请求超时（ms）",
-          bottomHelpMessage: "单次 SDK 请求的最长等待时间，默认 30000",
+          bottomHelpMessage: "单次 SDK 请求的最长等待时间，默认 30000；留空保存时按默认 30000 处理",
           component: "InputNumber",
-          required: true,
+          defaultValue: 30000,
           componentProps: { min: 1000, max: 300000 },
         },
         {
@@ -314,9 +332,9 @@ export function supportGuoba() {
           field: "tokenRows",
           label: "账号列表",
           helpMessage:
-            "表格展示所有账号，每行可编辑 / 删除；点「新增」打开弹窗填写 uid 与 cookie。cookie 列默认打码，点击可展开查看或编辑。",
+            "表格展示所有账号，每行可编辑 / 删除；点「新增」打开弹窗填写 uid 与 cookie。cookie 列默认打码，点编辑可展开查看或修改。",
           bottomHelpMessage:
-            "保存后重启 Bot 生效（支持热重载的核心版本 30s 内自动重连）；连接状态列读取 data/DouYin/connects.json 实时标记",
+            "保存后重启 Bot 生效（支持热重载的核心版本 30s 内自动重连）",
           component: "GSubForm",
           componentProps: {
             multiple: true,
@@ -338,15 +356,6 @@ export function supportGuoba() {
                 required: true,
                 componentProps: { placeholder: "sessionid=xxx; ttwid=xxx; ..." },
               },
-              {
-                // 表格第三列：连接状态徽标（值由 getConfigData 附加，仅展示不可编辑）
-                field: "connected",
-                label: "状态",
-                helpMessage: "读取 data/DouYin/connects.json 的实时连接状态，保存配置不会改变此列",
-                component: "Switch",
-                block: false,
-                componentProps: { disabled: true },
-              },
             ],
           },
         },
@@ -366,7 +375,8 @@ export function supportGuoba() {
       setConfigData(data, { Result }) {
         const cfg = withDefaults(loadCfg())
         cfg.permission = data.permission ?? cfg.permission
-        cfg.bot.timeout = Number(data["bot.timeout"] ?? cfg.bot.timeout)
+        const timeout = Number(data["bot.timeout"])
+        cfg.bot.timeout = Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULTS.bot.timeout
         cfg.bot.autoRead = data["bot.autoRead"] ?? cfg.bot.autoRead
         cfg.bot.activeStatus = data["bot.activeStatus"] ?? cfg.bot.activeStatus
         cfg.bot.forwardToImage = data["bot.forwardToImage"] ?? cfg.bot.forwardToImage
