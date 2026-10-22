@@ -1,0 +1,10 @@
+# 本地测试环境与临时产物，不属于插件仓库
+Yunzai/
+qrcode/
+dump.rdb
+.monkeycode/
+
+# 依赖与运行产物
+node_modules/
+*.log
+data/
