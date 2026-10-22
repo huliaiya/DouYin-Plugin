@@ -167,6 +167,48 @@ function stringifyYaml(obj) {
   return minimalYamlStringify(obj)
 }
 
+function loadConnects() {
+  try {
+    const obj = JSON.parse(readFileSync(path.join(process.cwd(), "data", "DouYin", "connects.json"), "utf8"))
+    return new Map(Object.entries(obj))
+  } catch {
+    return new Map()
+  }
+}
+
+// token 在 DouYin.yaml 里始终是 "uid:cookie" 字符串数组（index.js 的 30s 热重载与 makeConfig 都按此读取）；
+// 锅巴面板展示时拆成 { uid, cookie } 对象行，保存时拼回字符串，双向兼容旧数据
+function tokenStrToRows(strs) {
+  return (Array.isArray(strs) ? strs : []).map(raw => {
+    const s = String(raw ?? "").trim()
+    const idx = s.indexOf(":")
+    return {
+      uid: idx > 0 ? s.slice(0, idx) : "",
+      cookie: idx > 0 ? s.slice(idx + 1) : s,
+    }
+  })
+}
+
+function tokenRowsToStr(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter(r => r && (r.uid || r.cookie))
+    .map(r => {
+      const uid = String(r.uid ?? "").trim()
+      const cookie = String(r.cookie ?? "").trim()
+      if (!uid) return null
+      return cookie ? `${uid}:${cookie}` : uid
+    })
+    .filter(Boolean)
+}
+
+function withStatus(rows) {
+  const connects = loadConnects()
+  return rows.map(r => ({
+    ...r,
+    connected: connects.get(r.uid)?.connected ?? false,
+  }))
+}
+
 function loadCfg() {
   if (!existsSync(cfgFile)) return {}
   return parseYaml(readFileSync(cfgFile, "utf8")) || {}
@@ -190,7 +232,8 @@ function withDefaults(cfg) {
     tips: cfg.tips ?? DEFAULTS.tips,
     permission: cfg.permission ?? DEFAULTS.permission,
     bot: { ...DEFAULTS.bot, ...(cfg.bot || {}) },
-    token: Array.isArray(cfg.token) ? cfg.token : [],
+    // 面板侧统一用对象行；yaml 里存的是 "uid:cookie" 字符串数组，这里做拆分
+    tokenRows: tokenStrToRows(Array.isArray(cfg.token) ? cfg.token : []),
   }
 }
 
@@ -268,14 +311,43 @@ export function supportGuoba() {
           component: "SOFT_GROUP_BEGIN",
         },
         {
-          field: "token",
-          label: "账号列表（uid:cookie）",
-          helpMessage: "每行一个账号，格式 `uid:cookie`",
-          bottomHelpMessage: "保存后重启 Bot 生效（部分核心版本支持 yaml 热重载可即时生效）；cookie 失效会自动移除并提示重新扫码",
-          component: "InputTextArea",
+          field: "tokenRows",
+          label: "账号列表",
+          helpMessage:
+            "表格展示所有账号，每行可编辑 / 删除；点「新增」打开弹窗填写 uid 与 cookie。cookie 列默认打码，点击可展开查看或编辑。",
+          bottomHelpMessage:
+            "保存后重启 Bot 生效（支持热重载的核心版本 30s 内自动重连）；连接状态列读取 data/DouYin/connects.json 实时标记",
+          component: "GSubForm",
           componentProps: {
-            placeholder: "每行一个，例如：\n7303940934954584578:sessionid=xxx;...",
-            rows: 4,
+            multiple: true,
+            modalProps: { title: "账号" },
+            schemas: [
+              {
+                field: "uid",
+                label: "uid",
+                helpMessage: "账号数字 id，即 token 中 `:` 之前的部分",
+                component: "Input",
+                required: true,
+                componentProps: { placeholder: "7303940934954584578" },
+              },
+              {
+                field: "cookie",
+                label: "cookie",
+                helpMessage: "完整登录凭据（sessionid、ttwid、passport_csrf_token 等参数拼接）",
+                component: "InputPassword",
+                required: true,
+                componentProps: { placeholder: "sessionid=xxx; ttwid=xxx; ..." },
+              },
+              {
+                // 表格第三列：连接状态徽标（值由 getConfigData 附加，仅展示不可编辑）
+                field: "connected",
+                label: "状态",
+                helpMessage: "读取 data/DouYin/connects.json 的实时连接状态，保存配置不会改变此列",
+                component: "Switch",
+                block: false,
+                componentProps: { disabled: true },
+              },
+            ],
           },
         },
       ],
@@ -287,7 +359,8 @@ export function supportGuoba() {
           "bot.autoRead": cfg.bot.autoRead,
           "bot.activeStatus": cfg.bot.activeStatus,
           "bot.forwardToImage": cfg.bot.forwardToImage,
-          token: Array.isArray(cfg.token) ? cfg.token.join("\n") : "",
+          // 面板侧 token 是对象数组；连接状态从 connects.json 实时读取并附加到每行
+          tokenRows: withStatus(cfg.tokenRows),
         }
       },
       setConfigData(data, { Result }) {
@@ -297,13 +370,14 @@ export function supportGuoba() {
         cfg.bot.autoRead = data["bot.autoRead"] ?? cfg.bot.autoRead
         cfg.bot.activeStatus = data["bot.activeStatus"] ?? cfg.bot.activeStatus
         cfg.bot.forwardToImage = data["bot.forwardToImage"] ?? cfg.bot.forwardToImage
-        const rawTokens = String(data.token ?? "").trim()
-        cfg.token = rawTokens
-          ? rawTokens
-              .split("\n")
-              .map(s => s.trim())
-              .filter(s => s && s.includes(":"))
-          : []
+        // 面板侧 tokenRows（对象）→ 写回 yaml 的 token（"uid:cookie" 字符串数组），
+        // 同时剔除面板附加的 connected 状态字段
+        cfg.token = tokenRowsToStr(
+          (Array.isArray(data.tokenRows) ? data.tokenRows : []).map(r => ({
+            uid: r.uid,
+            cookie: r.cookie,
+          })),
+        )
         saveCfg(cfg)
         return Result.ok({}, "保存成功~ 配置下次重启 Bot 时加载生效；token 变更在支持热重载的核心版本下 30s 内自动重连")
       },
