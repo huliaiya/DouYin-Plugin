@@ -2021,7 +2021,7 @@ export class DouYinAdapter extends plugin {
               this.reply(
                 [
                   "登录触发密码二次验证",
-                  "可发送 #抖音bot密码<你的密码>，或直接回复账号密码完成验证（5 分钟内有效）",
+                  "请发送指令 #抖音bot密码<你的密码> 完成验证（5 分钟内有效）",
                 ].join("\n"),
                 true,
               )
@@ -2029,7 +2029,7 @@ export class DouYinAdapter extends plugin {
               this.reply(
                 [
                   `登录触发短信二次验证，验证码已发送${info.maskedMobile ? `（尾号 ${info.maskedMobile.slice(-4)}）` : ""}`,
-                  "可发送 #抖音bot验证码<6位数字>（例 #抖音bot验证码268655），或直接回复 6 位验证码（5 分钟内有效）",
+                  "请发送指令 #抖音bot验证码<6位数字>（例 #抖音bot验证码268655）完成验证（5 分钟内有效）",
                 ].join("\n"),
                 true,
               )
@@ -2062,20 +2062,24 @@ export class DouYinAdapter extends plugin {
     }
   }
 
-  /** 登录二次验证交互：等待期间直接回复验证码/密码即可，无需额外命令 */
+  /** 登录二次验证兜底提示：裸回复验证码/密码已停用，必须使用 #抖音bot验证码 / #抖音bot密码 指令 */
   async accept(e) {
     const wait = adapter.mfaWait
     if (!wait) return
-    // 仅拦截登录发起者本人的消息；无法确认发起者（如终端登录）时不限制
     if (wait.userId && e.user_id && String(e.user_id) !== String(wait.userId)) return
     const msg = e.msg?.trim()
+    // 短信验证码（4-6 位纯数字）或疑似密码文本，拦截并提示走指令
     if (!msg || msg.startsWith("#")) return
-    // 短信验证码要求纯数字（4-6 位），密码等其他验证接受任意非指令文本
-    if (wait.kind === "sms" && !/^\d{4,6}$/.test(msg)) return
-    adapter.mfaWait = null
-    wait.resolve(msg)
-    // 拦截该消息，避免验证码被其他插件当作普通消息处理
-    return "return"
+    const likeSms = wait.kind === "sms" && /^\d{4,6}$/.test(msg)
+    if (!likeSms && wait.kind === "password") {
+      this.reply("二次验证密码请改用指令发送：#抖音bot密码<你的密码>", true)
+      return "return"
+    }
+    if (likeSms) {
+      this.reply("验证码请改用指令发送：#抖音bot验证码<6位数字>（例 #抖音bot验证码268655）", true)
+      return "return"
+    }
+    // 其他普通消息不在二次验证拦截范围，放行
   }
 
   async Update() {
