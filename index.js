@@ -86,7 +86,7 @@ const adapter = new (class DouYinAdapter {
     )
     this.version = `${name} ${version}`
     this.logining = false
-    // 登录冷却：两次扫码登录（含退避重试）的最小间隔，避免 check_qrconnect 叠加触发抖音 error_code=7 限流
+    // 登录冷却：两次扫码登录的最小间隔，避免连发指令叠加 check_qrconnect 触发抖音 error_code=7 限流
     this.lastLoginAt = 0
     // 登录二次验证等待：{ kind: "sms"|"password", resolve, reject }，由验证码/密码指令消费
     this.mfaWait = null
@@ -2000,7 +2000,7 @@ export class DouYinAdapter extends plugin {
 
   async Login() {
     if (adapter.logining) return this.reply("已有登录流程进行中", true)
-    // 冷却防抖：两次登录（含重试）至少间隔 30 秒，避免连发指令叠加 check_qrconnect 触发抖音 error_code=7 限流
+    // 冷却防抖：两次登录至少间隔 30 秒，避免连发指令叠加 check_qrconnect 触发抖音 error_code=7 限流
     const sinceLast = Date.now() - adapter.lastLoginAt
     if (adapter.lastLoginAt && sinceLast < 30000) {
       return this.reply(`扫码登录冷却中，${Math.ceil((30000 - sinceLast) / 1000)} 秒后再试`, true)
@@ -2021,7 +2021,7 @@ export class DouYinAdapter extends plugin {
           )
           this.reply(["请使用抖音 App 扫码登录", segment.image(`base64://${base64}`)])
         },
-        // 触发短信/密码二次验证：交互式等待用户指令提交，5 分钟超时
+        // 触发短信/密码二次验证：交互式等待用户直接回复验证码/密码，5 分钟超时
         onMfa: info =>
           new Promise((resolve, reject) => {
             const wait = { kind: info.kind, resolve, reject, userId: this.e.user_id }
@@ -2029,7 +2029,7 @@ export class DouYinAdapter extends plugin {
               this.reply(
                 [
                   "登录触发密码二次验证",
-                  "请发送指令 #抖音bot密码<你的密码> 完成验证（5 分钟内有效）",
+                  "可发送 #抖音bot密码<你的密码>，或直接回复账号密码完成验证（5 分钟内有效）",
                 ].join("\n"),
                 true,
               )
@@ -2037,7 +2037,7 @@ export class DouYinAdapter extends plugin {
               this.reply(
                 [
                   `登录触发短信二次验证，验证码已发送${info.maskedMobile ? `（尾号 ${info.maskedMobile.slice(-4)}）` : ""}`,
-                  "请发送指令 #抖音bot验证码<6位数字>（例 #抖音bot验证码268655）完成验证（5 分钟内有效）",
+                  "可发送 #抖音bot验证码<6位数字>（例 #抖音bot验证码268655），或直接回复 6 位验证码（5 分钟内有效）",
                 ].join("\n"),
                 true,
               )
@@ -2063,22 +2063,6 @@ export class DouYinAdapter extends plugin {
       this.reply("账号连接失败", true)
       return false
     } catch (err) {
-      // check_qrconnect error_code=7（访问太频繁）是抖音对同 IP/设备指纹的扫码接口限流，
-      // SDK 内部无退避重试（Fatal 直接终止 login）。此处绝不自动重试拉新码——
-      // 重试会换掉当前未扫完的二维码、打乱二次验证节奏，让已发的验证码全部落空。
-      // 直接终止并提示冷却后再扫；仅 30s 防抖防连发，不重新 getQr。
-      if (/访问太频繁|error_code=7/i.test(String(err.message || err))) {
-        adapter.lastLoginAt = 0
-        this.reply(
-          [
-            "登录失败：访问太频繁（抖音风控限流）",
-            "请等待 10 分钟后再重新扫码，期间不要重复发 #抖音bot登录。",
-            "若长时间无法登录，需更换出口 IP 或检查设备指纹是否被风控。",
-          ].join("\n"),
-          true,
-        )
-        return false
-      }
       this.reply(`登录失败：${err.message || err}`, true)
       return false
     } finally {
@@ -2086,24 +2070,20 @@ export class DouYinAdapter extends plugin {
     }
   }
 
-  /** 登录二次验证兜底提示：裸回复验证码/密码已停用，必须使用 #抖音bot验证码 / #抖音bot密码 指令 */
+  /** 登录二次验证交互：等待期间直接回复验证码/密码即可，无需额外命令 */
   async accept(e) {
     const wait = adapter.mfaWait
     if (!wait) return
+    // 仅拦截登录发起者本人的消息；无法确认发起者（如终端登录）时不限制
     if (wait.userId && e.user_id && String(e.user_id) !== String(wait.userId)) return
     const msg = e.msg?.trim()
-    // 短信验证码（4-6 位纯数字）或疑似密码文本，拦截并提示走指令
     if (!msg || msg.startsWith("#")) return
-    const likeSms = wait.kind === "sms" && /^\d{4,6}$/.test(msg)
-    if (!likeSms && wait.kind === "password") {
-      this.reply("二次验证密码请改用指令发送：#抖音bot密码<你的密码>", true)
-      return "return"
-    }
-    if (likeSms) {
-      this.reply("验证码请改用指令发送：#抖音bot验证码<6位数字>（例 #抖音bot验证码268655）", true)
-      return "return"
-    }
-    // 其他普通消息不在二次验证拦截范围，放行
+    // 短信验证码要求纯数字（4-6 位），密码等其他验证接受任意非指令文本
+    if (wait.kind === "sms" && !/^\d{4,6}$/.test(msg)) return
+    adapter.mfaWait = null
+    wait.resolve(msg)
+    // 拦截该消息，避免验证码被其他插件当作普通消息处理
+    return "return"
   }
 
   async Update() {
