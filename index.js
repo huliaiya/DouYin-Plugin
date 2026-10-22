@@ -96,30 +96,6 @@ const adapter = new (class DouYinAdapter {
     this.refreshes = {}
     // 媒体代理路由（全局幂等，仅挂载一次）
     this.registerResourceProxy()
-    // 连接状态落盘：供锅巴面板等外部工具读取各账号当前连接状态（已连接/未连接），
-    // 文件路径 data/DouYin/connects.json，{ [uid]: { nickname, connected, lastChange, version } }
-    this.connectsFile = path.join("data", "DouYin", "connects.json")
-    this.connectsCache = new Map()
-  }
-
-  loadConnects() {
-    try {
-      return new Map(Object.entries(JSON.parse(readFileSync(this.connectsFile, "utf8"))))
-    } catch {
-      return new Map()
-    }
-  }
-
-  saveConnects(entry) {
-    try {
-      this.connectsCache.set(entry.uid, entry)
-      const obj = Object.fromEntries(this.connectsCache)
-      const dir = this.connectsFile.slice(0, this.connectsFile.lastIndexOf("/"))
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(this.connectsFile, JSON.stringify(obj, null, 2))
-    } catch (err) {
-      Bot.makeLog("warn", ["保存 connects.json 失败", err], this.id)
-    }
   }
 
   makeSDKLog(id) {
@@ -1605,12 +1581,6 @@ const adapter = new (class DouYinAdapter {
     delete Bot[id]
     const idx = Bot.uin.indexOf(id)
     if (idx !== -1) Bot.uin.splice(idx, 1)
-    const cached = this.connectsCache.get(id)
-    if (cached) {
-      cached.connected = false
-      cached.lastChange = Date.now()
-      this.saveConnects(cached)
-    }
   }
 
   // 断线自动重连：延迟 5 秒，最多 5 次，登录成功后重置计数
@@ -1883,13 +1853,6 @@ const adapter = new (class DouYinAdapter {
 
     Bot.makeLog("mark", `${this.name}(${this.id}) ${this.version} ${Bot[id].nickname} 已连接`, id)
     Bot.em(`connect.${id}`, { self_id: id })
-    this.saveConnects({
-      uid: id,
-      connected: true,
-      nickname: Bot[id].nickname ?? "",
-      lastChange: Date.now(),
-      version: this.version,
-    })
     return true
   }
 
