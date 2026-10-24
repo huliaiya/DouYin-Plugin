@@ -7,6 +7,7 @@ import path from "node:path"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { createDecipheriv } from "node:crypto"
 import { Readable } from "node:stream"
+import { pipeline } from "node:stream/promises"
 import { fileURLToPath } from "node:url"
 import * as douyin from "douyin.ts"
 import Renderer from "../../lib/renderer/loader.js"
@@ -26,6 +27,9 @@ const MEDIA_ROUTE = "/douyin-media"
 // 桌面端 UA：抖音 CDN 同时校验 UA 与 Referer，缺一即 403
 const DESKTOP_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+// 媒体域名白名单、请求约束与校验逻辑集中在 lib/guard.js，便于独立测试
+import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } from "./lib/guard.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -66,6 +70,8 @@ const { config, configSave } = await makeConfig(
       forwardToImage: true,
     },
     token: [],
+    // 追加允许访问的媒体域名后缀（抖音官方 CDN 域名已内置白名单，此处用于补充新域名）
+    mediaHostAllowlist: [],
   },
   {
     tips: [
@@ -152,47 +158,83 @@ const adapter = new (class DouYinAdapter {
     globalThis[MEDIA_MOUNTED] = true
     if (!Bot.express.skip_auth.includes(MEDIA_ROUTE)) Bot.express.skip_auth.push(MEDIA_ROUTE)
     Bot.express.get(`${MEDIA_ROUTE}/:uin`, async (req, res) => {
-      const url = String(req.query.u ?? "")
+      const raw = String(req.query.u ?? "")
       const uin = String(req.params.uin ?? "")
-      if (!/^https?:\/\//i.test(url)) return res.status(400).end("bad url")
+      const target = allowedMediaUrl(raw, config.mediaHostAllowlist)
+      if (!target) return res.status(403).end("blocked host")
       try {
-        const headers = { Referer: "https://www.douyin.com/", "User-Agent": DESKTOP_UA }
         const cookie = Bot[uin]?.getCookies?.()
-        if (cookie) headers.Cookie = cookie
-        const upstream = await fetch(url, { headers, redirect: "follow" })
-        if (!upstream.ok) return res.status(upstream.status).end("upstream error")
-        if (!upstream.body) return res.status(502).end("empty upstream")
+        const upstream = await this.fetchMedia(target, cookie)
+        if (upstream.error) {
+          Bot.makeLog("warn", ["媒体代理拒绝", upstream.error, raw.slice(0, 120)], uin)
+          return res.status(403).end("blocked host")
+        }
+        const res2 = upstream.res
+        if (!res2.ok) return res.status(res2.status).end("upstream error")
+        if (!res2.body) return res.status(502).end("empty upstream")
+        const len = Number(res2.headers.get("content-length") || 0)
+        if (len > MEDIA_MAX_BYTES) return res.status(413).end("too large")
         const skey = String(req.query.k ?? "")
         if (/^[0-9a-f]{64}$/i.test(skey)) {
-          const raw = Buffer.from(await upstream.arrayBuffer())
-          const plain = decryptImage(raw, skey)
+          const raw2 = Buffer.from(await res2.arrayBuffer())
+          if (raw2.length > MEDIA_MAX_BYTES) return res.status(413).end("too large")
+          const plain = decryptImage(raw2, skey)
           if (plain) {
             res.setHeader("Content-Type", imageContentType(plain))
             res.setHeader("Content-Length", String(plain.length))
             return res.end(plain)
           }
           // 解密失败说明该资源本身是明文，按原样回吐，避免误传 skey 破坏图片
-          res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/octet-stream")
-          res.setHeader("Content-Length", String(raw.length))
-          return res.end(raw)
+          res.setHeader("Content-Type", res2.headers.get("content-type") || "application/octet-stream")
+          res.setHeader("Content-Length", String(raw2.length))
+          return res.end(raw2)
         }
         if (/^[0-9a-f]{32}$/i.test(skey)) {
-          const plain = douyin.decryptCencMp4(new Uint8Array(await upstream.arrayBuffer()), skey)
+          const buf = Buffer.from(await res2.arrayBuffer())
+          if (buf.length > MEDIA_MAX_BYTES) return res.status(413).end("too large")
+          const plain = douyin.decryptCencMp4(new Uint8Array(buf), skey)
           res.setHeader("Content-Type", "video/mp4")
           res.setHeader("Content-Length", String(plain.length))
           return res.end(plain)
         }
-        const type = upstream.headers.get("content-type")
-        const len = upstream.headers.get("content-length")
+        const type = res2.headers.get("content-type")
         if (type) res.setHeader("Content-Type", type)
-        if (len) res.setHeader("Content-Length", len)
-        Readable.fromWeb(upstream.body).pipe(res)
+        if (len) res.setHeader("Content-Length", String(len))
+        await pipeline(Readable.fromWeb(res2.body), limitStream(MEDIA_MAX_BYTES), res)
       } catch (err) {
-        Bot.makeLog("warn", ["媒体代理失败", url.slice(0, 120), err], uin)
+        Bot.makeLog("warn", ["媒体代理失败", raw.slice(0, 120), err], uin)
         if (!res.headersSent) res.status(502).end("proxy error")
         else res.destroy()
       }
     })
+  }
+
+  // 拉取抖音媒体：逐跳校验重定向目标均命中域名白名单，Cookie 只发给白名单域名，并施加超时与体积上限
+  async fetchMedia(target, cookie) {
+    let url = target
+    for (let hop = 0; hop < 4; hop++) {
+      const u = allowedMediaUrl(url, config.mediaHostAllowlist)
+      if (!u) return { error: "host not allowed" }
+      const headers = { Referer: "https://www.douyin.com/", "User-Agent": DESKTOP_UA }
+      if (cookie) headers.Cookie = cookie
+      const res = await fetch(u, {
+        headers,
+        redirect: "manual",
+        signal: AbortSignal.timeout(MEDIA_FETCH_TIMEOUT),
+      })
+      if ([301, 302, 303, 307, 308].includes(res.status)) {
+        const location = res.headers.get("location")
+        if (!location) return { error: "invalid redirect" }
+        try {
+          url = new URL(location, u)
+        } catch {
+          return { error: "invalid redirect" }
+        }
+        continue
+      }
+      return { res }
+    }
+    return { error: "too many redirects" }
   }
 
   // 消息 → 消息段数组 + 日志用 raw_message：与 OPQBot/GSUIDCore 接收侧一致，组装 message 段时同步拼接
@@ -580,20 +622,22 @@ const adapter = new (class DouYinAdapter {
     if (typeof input !== "string") return input
     const s = input.trim().replace(/^`+|`+$/g, "")
     if (/^https?:\/\//i.test(s)) {
-      const headers = {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        referer: "https://www.douyin.com/",
-      }
-      // 抖音图片 CDN 需登录态，附上账号 Cookie
+      // 仅允许抖音官方域名：媒体地址来自收到的消息内容，非白名单域名既不下载也不附带账号 Cookie
+      const target = allowedMediaUrl(s, config.mediaHostAllowlist)
+      if (!target) throw new Error(`媒体地址不在允许的域名白名单内：${s.slice(0, 80)}`)
+      // 抖音图片 CDN 需登录态，附上账号 Cookie（目标与各跳重定向均已通过白名单校验）
       const cookie = bot?.getCookies?.()
-      if (cookie) headers.cookie = cookie
-      const res = await fetch(s, { headers, redirect: "follow" })
+      const upstream = await this.fetchMedia(target, cookie)
+      if (upstream.error) throw new Error(`媒体下载失败：${upstream.error}`)
+      const res = upstream.res
       if (!res.ok) throw new Error(`媒体下载失败 HTTP ${res.status}`)
       const type = (res.headers.get("content-type") || "").toLowerCase()
       if (type && !type.startsWith("image/") && !["application/octet-stream", "binary/octet-stream"].includes(type))
         throw new Error(`媒体下载失败：服务器返回 ${type}（URL 可能已失效或需登录）`)
+      const declared = Number(res.headers.get("content-length") || 0)
+      if (declared > MEDIA_MAX_BYTES) throw new Error(`媒体体积超过 ${MEDIA_MAX_BYTES} 字节上限`)
       const buf = Buffer.from(await res.arrayBuffer())
+      if (buf.length > MEDIA_MAX_BYTES) throw new Error(`媒体体积超过 ${MEDIA_MAX_BYTES} 字节上限`)
       if (!buf.length) throw new Error("媒体下载为空")
       Bot.makeLog("debug", ["媒体下载", s.slice(0, 80)], bot?.uin)
       return check(buf)

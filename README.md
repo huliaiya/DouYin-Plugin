@@ -55,6 +55,7 @@ pnpm install
 - `bot.autoRead` 收到消息后自动标记已读（对方可见已读回执）
 - `bot.activeStatus` 上报在线状态（对方可见在线）
 - `token` 账号列表，格式 `uid:cookie`
+- `mediaHostAllowlist` 媒体下载域名白名单的附加后缀，默认空（仅放行抖音官方 CDN 域名）
 
 令牌变更后无需重启，适配器会定时检测配置变化自动连接新账号、断开删除的账号
 
@@ -72,6 +73,24 @@ pnpm install
 ### 抖音风控限制
 
 可能出现消息仅回显到自身、对方看不到：
+
+## 安全说明
+
+插件内置的媒体代理会代取抖音 CDN 上的图片、视频等资源，默认启用以下限制：
+
+- **域名白名单**：仅允许 `douyinpic.com`、`douyincdn.com`、`byteimg.cn`、`pstatp.com`、`ixigua.com`、`feoffline.com` 等抖音官方域名及其子域名，非白名单地址直接返回 403
+- **逐跳校验**：跟随重定向时对每一跳重新校验目标域名，避免白名单域名跳转至内网地址
+- **Cookie 隔离**：账号 Cookie 仅发送至白名单目标，不随任意请求外发
+- **资源上限**：单次请求超时 30 秒，响应体超过 64 MB 即中断
+
+如需接入其他 CDN，在 `config/DouYin.yaml` 中配置 `mediaHostAllowlist` 追加域名后缀，例如：
+
+```yaml
+mediaHostAllowlist:
+  - cdn.example.com
+```
+
+此外，Yunzai 自身监听端口（如 2536）应限制在内网或通过反向代理加鉴权访问，避免插件接口被外部直接调用。
 
 ## 消息支持
 

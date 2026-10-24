@@ -4,14 +4,23 @@
   "type": "module",
   "description": "TRSS-Yunzai 抖音适配器插件",
   "license": "MIT",
-  "author": "dmmdekkd",
-  "homepage": "https://github.com/dmmdekkd/douyin.ts#readme",
+  "author": "huliaiya",
+  "homepage": "https://github.com/huliaiya/DouYin-Plugin#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmmdekkd/douyin.ts.git"
+    "url": "git+https://github.com/huliaiya/DouYin-Plugin.git"
   },
   "bugs": {
-    "url": "https://github.com/dmmdekkd/douyin.ts/issues"
+    "url": "https://github.com/huliaiya/DouYin-Plugin/issues"
+  },
+  "keywords": [
+    "yunzai",
+    "trss-yunzai",
+    "douyin",
+    "adapter"
+  ],
+  "scripts": {
+    "test": "node --test test/guard.test.js"
   },
   "dependencies": {
     "douyin.ts": "^0.6.7",
