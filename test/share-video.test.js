@@ -1,6 +1,19 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { buildApiQuery, fetchVideoUrlsFromApi, pickVideoUrls } from "../lib/share-video.js"
+import { buildApiQuery, buildWebDetailUrl, fetchVideoUrlsFromApi, pickVideoUrls } from "../lib/share-video.js"
+
+test("作品详情请求地址：设备身份与作品列表入参", () => {
+  const url = new URL(
+    buildWebDetailUrl("7699765354280520969", { deviceId: "1234567890123456", installId: "6543210987654321", guid: "guid-1" }),
+  )
+  assert.equal(url.host, "www-hj.douyin.com")
+  assert.equal(url.pathname, "/aweme/v1/web/multi/aweme/detail/")
+  assert.equal(url.searchParams.get("device_id"), "1234567890123456")
+  assert.equal(url.searchParams.get("iid"), "6543210987654321")
+  assert.equal(url.searchParams.get("awemeim_guid"), "guid-1")
+  assert.equal(url.searchParams.get("aweme_ids"), '["7699765354280520969"]')
+  assert.equal(url.searchParams.get("aid"), "339757")
+})
 
 test("播放地址优先级：无水印接口在前，去重", () => {
   const urls = pickVideoUrls({

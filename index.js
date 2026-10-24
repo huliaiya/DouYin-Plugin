@@ -34,7 +34,7 @@ import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
 import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 import { isLoginRiskError, isSessionLostError, loginRiskHint, sessionLostHint } from "./lib/login-error.js"
-import { downloadVideo, fetchAppAwemeDetail, fetchVideoUrlsFromApi, pickVideoUrls } from "./lib/share-video.js"
+import { downloadVideo, fetchAppAwemeDetail, fetchVideoUrlsFromApi, fetchWebAwemeDetail, pickVideoUrls } from "./lib/share-video.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -1749,19 +1749,29 @@ const adapter = new (class DouYinAdapter {
     return Bot[id]?.getCookies?.() || ""
   }
 
-  // 分享视频原片回传：优先走外部解析服务，失败回退内置详情解析；下载视频字节后以视频消息发回原会话
+  // 分享视频原片回传：优先专用网页 cookie 走内置详情接口，其次外部解析服务，最后账号 cookie 与 App 兜底
   async replyShareVideo(id, data, msg) {
     const itemId = msg?.share?.itemId
     if (!itemId) return
     Bot.makeLog("info", `收到分享作品 ${itemId}，开始解析原片`, id)
     const urls = []
+    const parseCookie = config.bot.shareVideoCookie || ""
+    if (parseCookie) {
+      try {
+        const detail = await fetchWebAwemeDetail(Bot[id].sdk, itemId, parseCookie)
+        urls.push(...pickVideoUrls(detail))
+        Bot.makeLog("info", `专用网页 cookie 解析成功，得到 ${urls.length} 个地址`, id)
+      } catch (err) {
+        Bot.makeLog("warn", [`专用网页 cookie 解析失败：${err?.message || err}`, itemId], id)
+      }
+    }
     const api = config.bot.shareVideoApi
-    if (api) {
+    if (!urls.length && api) {
       try {
         urls.push(
           ...(await fetchVideoUrlsFromApi(api, itemId, {
             cookie: this.getAccountCookie(id),
-            parseCookie: config.bot.shareVideoCookie || "",
+            parseCookie,
             token: config.bot.shareVideoApiToken || "",
           })),
         )
