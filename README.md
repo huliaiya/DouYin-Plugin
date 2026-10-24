@@ -152,10 +152,8 @@ mediaHostAllowlist:
 本插件面向 TRSS-Yunzai 运行时。若你希望在其他框架中使用抖音相关能力，可参考以下项目：
 
 - [zhin-adapter-douyin](https://github.com/zhinjs/zhin-adapter-douyin)（Zhin 框架）
-- [karin-plugin-adapter-douyin](https://github.com/dmmdekkd/karin-plugin-adapter-douyin)（Karin 框架）
 
 ## 相关链接
 
 - 许可证：MIT（[LICENSE](LICENSE)）
-- SDK：https://github.com/dmmdekkd/douyin.ts
 - TRSS-Yunzai：https://github.com/TimeRainStarSky/Yunzai
