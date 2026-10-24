@@ -31,6 +31,13 @@ test("普通 cookie 字符串原样归一化", () => {
   assert.equal(parseCookieInput("sessionid=abc;\n ttwid=def"), "sessionid=abc; ttwid=def")
 })
 
+test("浏览器复制格式：容忍无值标记、空段与键值周围空格", () => {
+  assert.equal(parseCookieInput("enter_pc_once=1; douyin.com; x=2"), "enter_pc_once=1; douyin.com; x=2")
+  assert.equal(parseCookieInput("a = 1 ; b = 2"), "a=1; b=2")
+  assert.equal(parseCookieInput("a=1;;b=2;"), "a=1; b=2")
+  assert.equal(parseCookieInput("token=abc=="), "token=abc==")
+})
+
 test("非法 JSON 回退为普通字符串处理", () => {
   assert.equal(parseCookieInput("[{name: sessionid"), "[{name: sessionid")
   assert.equal(parseCookieInput(""), "")
