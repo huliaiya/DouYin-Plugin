@@ -32,7 +32,7 @@ const DESKTOP_UA =
 import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } from "./lib/guard.js"
 import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
-import { normalizeCookie, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
+import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 import { isLoginRiskError, loginRiskHint } from "./lib/login-error.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
@@ -2041,7 +2041,7 @@ export class DouYinAdapter extends plugin {
   /** 网页版 cookie 添加账号：从 cookie 解析 UID 后连接，账号列表中同 UID 会被覆盖 */
   async LoginByCookie() {
     const raw = this.e.msg.replace(/^.*?cookie\s+/is, "")
-    const cookie = normalizeCookie(raw)
+    const cookie = parseCookieInput(raw)
     if (!hasCookiePairs(cookie)) {
       return this.reply("未识别到 cookie 内容，格式：#抖音bot登录cookie <完整cookie字符串>", true)
     }

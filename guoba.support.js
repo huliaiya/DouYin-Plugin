@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url"
 import YAML from "yaml"
 import { DEFAULT_CONFIG } from "./lib/config-default.js"
 import { parseAccounts, serializeAccounts } from "./lib/account.js"
+import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 
 const PLUGIN_ROOT = path.dirname(fileURLToPath(import.meta.url))
 const CONFIG_FILE = path.resolve(PLUGIN_ROOT, "../../config/DouYin.yaml")
@@ -16,7 +17,8 @@ const SCHEMAS = [
   {
     field: "token",
     label: "账号列表",
-    bottomHelpMessage: "每个账号填写 UID 与 Cookie 两项，点击行内「编辑」修改。扫码登录成功后插件会自动写入，删除某一条会断开该账号",
+    bottomHelpMessage:
+      "每个账号填写 UID 与 Cookie 两项，点击行内「编辑」修改。UID 可留空，留空时插件用 Cookie 自动识别。Cookie 可直接粘贴 Cookie-Editor 导出的 JSON 或普通 cookie 字符串。扫码登录成功后插件会自动写入，删除某一条会断开该账号",
     component: "GSubForm",
     componentProps: {
       multiple: true,
@@ -27,10 +29,10 @@ const SCHEMAS = [
         {
           field: "uid",
           label: "UID",
-          bottomHelpMessage: "抖音账号 UID",
+          bottomHelpMessage: "抖音账号 UID，可留空由插件根据 Cookie 自动识别",
           component: "Input",
           componentProps: {
-            placeholder: "抖音 UID",
+            placeholder: "留空自动识别",
           },
         },
         {
@@ -43,10 +45,11 @@ const SCHEMAS = [
         {
           field: "cookie",
           label: "Cookie",
-          bottomHelpMessage: "该 UID 对应的登录 cookie",
+          bottomHelpMessage:
+            "该 UID 对应的登录 cookie，支持 Cookie-Editor 导出的 JSON 数组、JSON 对象或 name=value; name=value 字符串",
           component: "InputPassword",
           componentProps: {
-            placeholder: "账号 cookie",
+            placeholder: "账号 cookie 或 Cookie-Editor 导出内容",
           },
         },
       ],
@@ -124,10 +127,6 @@ function parseTokenList(tokens, accountEnabled) {
   return parseAccounts(tokens, accountEnabled)
 }
 
-function stringifyTokenList(list) {
-  return serializeAccounts(list)
-}
-
 async function readConfig() {
   try {
     const raw = await fs.readFile(CONFIG_FILE, "utf8")
@@ -173,9 +172,24 @@ export function supportGuoba() {
         for (const [key, value] of Object.entries(data ?? {})) {
           if (!key) continue
           if (key === "token") {
-            const accounts = stringifyTokenList(value)
-            setPath(config, "token", accounts.token)
-            setPath(config, "accountEnabled", accounts.accountEnabled)
+            const accounts = []
+            for (const item of Array.isArray(value) ? value : []) {
+              const cookie = parseCookieInput(item?.cookie)
+              if (!hasCookiePairs(cookie)) continue
+              let uid = String(item?.uid ?? "").trim()
+              if (!uid) {
+                try {
+                  const resolved = await resolveWebAccount(cookie)
+                  uid = resolved.uid
+                } catch (err) {
+                  return Result.error(`账号添加失败：${err.message || err}`, 400)
+                }
+              }
+              accounts.push({ uid, cookie, enabled: item?.enabled !== false })
+            }
+            const serialized = serializeAccounts(accounts)
+            setPath(config, "token", serialized.token)
+            setPath(config, "accountEnabled", serialized.accountEnabled)
             continue
           }
           setPath(config, key, value)
