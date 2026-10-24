@@ -634,12 +634,20 @@ const adapter = new (class DouYinAdapter {
   // 发送单条消息体（reply 优先走引用回复），statusCode 非 0 抛错由调用方统一处理
   // 引用回复透传完整 body：SDK 0.6.7 起支持引用任意类型消息（图片/视频/文件等），@提及/@所有人随 body 一并生效
   async sendBody(data, { reply, body }) {
-    const ret = reply
-      ? await data.bot.sdk.msg.reply(data.chatId, reply, body)
-      : await data.bot.sdk.msg.send(data.chatId, body)
-    Bot.makeLog("debug", ["发送消息返回", ret], data.self_id)
-    if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
-    return ret
+    try {
+      const ret = reply
+        ? await data.bot.sdk.msg.reply(data.chatId, reply, body)
+        : await data.bot.sdk.msg.send(data.chatId, body)
+      Bot.makeLog("debug", ["发送消息返回", ret], data.self_id)
+      if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+      return ret
+    } catch (err) {
+      const message = String(err?.message || err)
+      if (/upload credentials unavailable/i.test(message)) {
+        throw new Error("媒体上传凭据获取失败：登录态已失效或触发风控，请重新扫码登录（#抖音bot登录）")
+      }
+      throw err
+    }
   }
 
   // 合并转发转图片：把节点渲染成「聊天记录」卡片（config.bot.forwardToImage 开启时走此路径）。
@@ -1318,7 +1326,10 @@ const adapter = new (class DouYinAdapter {
     }
 
     Bot[id].replys[data.message_id] = msg
-    setTimeout(() => delete Bot[id].replys[data.message_id], 300000)
+    setTimeout(() => {
+      const bot = Bot[id]
+      if (bot?.replys) delete bot.replys[data.message_id]
+    }, 300000)
 
     // 自动标记已读：readSwitch 清列表红点（50013 依据），markRead 会话内已读（对方可见）
     if (config.bot.autoRead)
@@ -1983,14 +1994,23 @@ export class DouYinAdapter extends plugin {
     try {
       const session = await douyin.login({
         onQr: async qr => {
-          if (this.e.adapter_id === "stdin") {
-            logger.info(`请使用抖音 App 扫码登录\n${await QRCode.toString(qr.url, { type: "terminal", small: true })}`)
-            return
-          }
           const base64 = (qr.base64 || (await QRCode.toBuffer(qr.url)).toString("base64")).replace(
             /^data:image\/\w+;base64,/,
             "",
           )
+          if (this.e.adapter_id === "stdin") {
+            const qrFile = path.resolve(adapter.path, "qrcode.png")
+            try {
+              mkdirSync(path.dirname(qrFile), { recursive: true })
+              writeFileSync(qrFile, Buffer.from(base64, "base64"))
+            } catch (e) {
+              logger.warn(`二维码图片写入失败：${e.message}`)
+            }
+            logger.info(
+              `请使用抖音 App 扫码登录\n二维码图片：${qrFile}\n${await QRCode.toString(qr.url, { type: "terminal", small: true })}`,
+            )
+            return
+          }
           this.reply(["请使用抖音 App 扫码登录", segment.image(`base64://${base64}`)])
         },
         // 触发短信/密码二次验证：交互式等待用户直接回复验证码/密码，5 分钟超时
