@@ -32,6 +32,7 @@ const DESKTOP_UA =
 import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } from "./lib/guard.js"
 import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
+import { normalizeCookie, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 import { isLoginRiskError, loginRiskHint } from "./lib/login-error.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
@@ -1940,6 +1941,11 @@ export class DouYinAdapter extends plugin {
           permission: config.permission,
         },
         {
+          reg: "^#[Dd]ou[Yy]in[Bb]ot(登录|添加)cookie\\s+.+|^#抖音bot(登录|添加)cookie\\s+.+",
+          fnc: "LoginByCookie",
+          permission: config.permission,
+        },
+        {
           reg: "^#[Dd]ou[Yy]in[Bb]ot更新$|^#抖音bot更新$",
           fnc: "Update",
           permission: config.permission,
@@ -2029,6 +2035,32 @@ export class DouYinAdapter extends plugin {
       return false
     } finally {
       adapter.logining = false
+    }
+  }
+
+  /** 网页版 cookie 添加账号：从 cookie 解析 UID 后连接，账号列表中同 UID 会被覆盖 */
+  async LoginByCookie() {
+    const raw = this.e.msg.replace(/^.*?cookie\s+/is, "")
+    const cookie = normalizeCookie(raw)
+    if (!hasCookiePairs(cookie)) {
+      return this.reply("未识别到 cookie 内容，格式：#抖音bot登录cookie <完整cookie字符串>", true)
+    }
+    try {
+      const { uid, nickname } = await resolveWebAccount(cookie)
+      const token = `${uid}:${cookie}`
+      if (await adapter.connect(token)) {
+        config.token = config.token.filter(i => !i.startsWith(`${uid}:`))
+        config.token.push(token)
+        if (Bot[uid] && nickname) Bot[uid].info.nickname = nickname
+        await configSave()
+        this.reply(`账号 ${uid}${nickname ? `（${nickname}）` : ""} 连接成功`, true)
+        return true
+      }
+      this.reply("账号连接失败：cookie 可能已过期或触发风控", true)
+      return false
+    } catch (err) {
+      this.reply(`添加失败：${err.message || err}`, true)
+      return false
     }
   }
 

@@ -42,9 +42,20 @@ pnpm install
 
 - `#抖音bot账号` 查看已登录账号
 - `#抖音bot登录` 扫码登录新账号
+- `#抖音bot登录cookie <完整cookie>` 用网页版 cookie 添加账号（自动识别 UID，无需扫码）
 - `#抖音bot删除uid` 删除账号并断开连接
 - `#抖音bot更新` 更新插件（更新成功自动重启）
 - `#抖音bot更新日志` 查看插件更新日志
+
+### 用网页版 cookie 添加账号
+
+不想扫码时，可从浏览器抖音网页版（已登录）导出 cookie 后直接粘贴：
+
+1. 浏览器扩展 Cookie-Editor 打开 `https://www.douyin.com`，导出当前站点 cookie
+2. 发送 `#抖音bot登录cookie <完整cookie字符串>`（cookie 需含 `sessionid`，并建议保留 `sid_guard`、`sid_tt`、`ttwid`、`passport_csrf_token`、`s_v_web_id`、`UIFID`、`web_sign_token`）
+3. 插件用 cookie 请求抖音资料接口自动识别数字 UID，连接成功后写入账号列表并回复「连接成功」
+
+同一 UID 再次提交会覆盖旧记录；cookie 过期时回复「cookie 校验失败」，重新导出即可。网页版 cookie 与 App 扫码来源不同，风控概率相对更高，抖音「登录双重验证」建议保持关闭。
 
 ## 配置说明
 

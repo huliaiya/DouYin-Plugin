@@ -139,7 +139,7 @@ async function readConfig() {
 }
 
 async function writeConfig(config) {
-  await fs.writeFile(CONFIG_FILE, YAML.stringify(config), "utf8")
+  await fs.writeFile(CONFIG_FILE, YAML.stringify(config, { lineWidth: 0 }), "utf8")
 }
 
 export function supportGuoba() {
