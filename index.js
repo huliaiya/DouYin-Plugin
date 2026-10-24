@@ -34,6 +34,7 @@ import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
 import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 import { isLoginRiskError, isSessionLostError, loginRiskHint, sessionLostHint } from "./lib/login-error.js"
+import { downloadVideo, fetchAppAwemeDetail, pickVideoUrls } from "./lib/share-video.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -124,6 +125,28 @@ const adapter = new (class DouYinAdapter {
       writeFileSync(this.deviceFile(id), JSON.stringify(device))
     } catch (err) {
       Bot.makeLog("warn", ["设备身份落盘失败", id, err], this.id)
+    }
+  }
+
+  // 媒体上传凭据（STS）落盘路径：与设备身份同目录，重启后网页会话已失效时仍可复用凭据发图发视频
+  uploadCredFile(id) {
+    return `${this.path}${id}/upload-credentials.json`
+  }
+
+  loadUploadCred(id) {
+    try {
+      return JSON.parse(readFileSync(this.uploadCredFile(id), "utf8"))
+    } catch {
+      return undefined
+    }
+  }
+
+  saveUploadCred(id, credentials) {
+    try {
+      mkdirSync(path.dirname(this.uploadCredFile(id)), { recursive: true })
+      writeFileSync(this.uploadCredFile(id), JSON.stringify({ ...credentials, at: Date.now() }))
+    } catch (err) {
+      Bot.makeLog("debug", ["上传凭据落盘失败", id, err], this.id)
     }
   }
 
@@ -1344,6 +1367,13 @@ const adapter = new (class DouYinAdapter {
         .catch(err => Bot.makeLog("debug", ["自动已读失败", err], id))
 
     Bot.em(`${data.post_type}.${data.message_type}.${data.sub_type}`, data)
+
+    // 分享作品原片回传：解析作品播放地址，下载视频后以视频消息发回原会话
+    if (config.bot.shareVideoReply && msg.type === "share" && msg.share?.itemId) {
+      this.replyShareVideo(id, data, msg).catch(err =>
+        Bot.makeLog("error", ["分享作品原片回传失败", err], id),
+      )
+    }
   }
 
   // 由会话 id 反查群/好友 id（事件部分类型仅携带长会话 id）
@@ -1673,13 +1703,15 @@ const adapter = new (class DouYinAdapter {
     const originalCredentials = uploader?.credentials?.bind(uploader)
     if (!uploader || typeof originalCredentials !== "function") return
 
-    const cache = { credentials: null, at: 0 }
+    const saved = this.loadUploadCred(id)
+    const cache = { credentials: saved?.accessKeyId ? saved : null, at: saved?.at ?? 0 }
     const TTL = 30 * 60 * 1000
     uploader.credentials = async (...args) => {
       if (cache.credentials && Date.now() - cache.at < TTL) return cache.credentials
       const credentials = await originalCredentials(...args)
       cache.credentials = credentials
       cache.at = Date.now()
+      this.saveUploadCred(id, credentials)
       return credentials
     }
 
@@ -1702,8 +1734,37 @@ const adapter = new (class DouYinAdapter {
       await uploader.credentials()
       Bot.makeLog("info", `${id} 媒体上传凭据已缓存`, id)
     } catch (err) {
-      Bot.makeLog("warn", `${id} 媒体上传凭据获取失败，图片/视频发送可能不可用：${err?.message || err}`, id)
+      if (cache.credentials)
+        Bot.makeLog("warn", `${id} 媒体上传凭据获取失败，沿用已落盘凭据：${err?.message || err}`, id)
+      else Bot.makeLog("warn", `${id} 媒体上传凭据获取失败，图片/视频发送可能不可用：${err?.message || err}`, id)
     }
+  }
+
+  // 分享视频原片回传：取作品播放地址下载视频字节，再以视频消息发回原会话
+  async replyShareVideo(id, data, msg) {
+    const itemId = msg?.share?.itemId
+    if (!itemId) return
+    Bot.makeLog("info", `收到分享作品 ${itemId}，开始解析原片`, id)
+    let detail = null
+    try {
+      detail = (await Bot[id].sdk.media.awemeDetail([itemId]))?.[0] ?? null
+    } catch (err) {
+      Bot.makeLog("debug", ["作品详情(web)获取失败", err], id)
+    }
+    if (!detail) detail = await fetchAppAwemeDetail(itemId)
+    let buf = null
+    for (const url of pickVideoUrls(detail)) {
+      try {
+        buf = await downloadVideo(url)
+        break
+      } catch (err) {
+        Bot.makeLog("debug", ["视频下载失败", err], id)
+      }
+    }
+    if (!buf) throw new Error("未取到可下载的视频地址")
+    const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "video", video: { source: buf } })
+    if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+    Bot.makeLog("info", `分享作品原片已回传（${buf.length}B）`, id)
   }
 
   async connect(token) {
