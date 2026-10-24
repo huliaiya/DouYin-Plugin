@@ -1761,6 +1761,7 @@ const adapter = new (class DouYinAdapter {
         urls.push(
           ...(await fetchVideoUrlsFromApi(api, itemId, {
             cookie: this.getAccountCookie(id),
+            parseCookie: config.bot.shareVideoCookie || "",
             token: config.bot.shareVideoApiToken || "",
           })),
         )
@@ -1776,7 +1777,13 @@ const adapter = new (class DouYinAdapter {
       } catch (err) {
         Bot.makeLog("debug", ["作品详情(web)获取失败", err], id)
       }
-      if (!detail) detail = await fetchAppAwemeDetail(itemId)
+      if (!detail) {
+        try {
+          detail = await fetchAppAwemeDetail(itemId)
+        } catch (err) {
+          Bot.makeLog("warn", [`作品详情(App)获取失败：${err?.message || err}`, itemId], id)
+        }
+      }
       urls.push(...pickVideoUrls(detail))
     }
     let buf = null

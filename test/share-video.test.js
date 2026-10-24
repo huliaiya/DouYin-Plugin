@@ -57,6 +57,7 @@ test("解析服务调用：POST 携带账号 cookie，失败回退 GET", async (
   try {
     const urls = await fetchVideoUrlsFromApi("https://api.example/douyin.php", "123", {
       cookie: "sessionid=abc",
+      parseCookie: "sessionid=web",
       token: "tok",
     })
     assert.deepEqual(urls, ["https://cdn.example/a.mp4"])
@@ -65,6 +66,7 @@ test("解析服务调用：POST 携带账号 cookie，失败回退 GET", async (
     const body = JSON.parse(calls[0].options.body)
     assert.equal(body.url, "123")
     assert.equal(body.cookie, "sessionid=abc")
+    assert.equal(body.parse_cookie, "sessionid=web")
     assert.equal(body.token, "tok")
     assert.equal(body.type, "json")
   } finally {
