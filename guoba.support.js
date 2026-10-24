@@ -108,7 +108,7 @@ const SCHEMAS = [
   {
     field: "bot.shareVideoImageFile",
     label: "图片同时发附件",
-    bottomHelpMessage: "图文作品的图片除图片消息外再发一份图片附件，图片消息被审核或客户端不展示时用附件取原图",
+    bottomHelpMessage: "图文作品的图片除图片消息外再发一份图片附件；关闭后仅在图片消息被审核或发送失败时补发附件",
     component: "Switch",
   },
   {

@@ -1834,7 +1834,7 @@ const adapter = new (class DouYinAdapter {
     }
     await this.sendShareMeta(id, data, detail ? pickShareMeta(detail) : apiMeta, itemId, parseCookie)
     if (imageUrls.length) {
-      for (const url of imageUrls.slice(0, 9)) {
+      for (const [imageIndex, url] of imageUrls.slice(0, 9).entries()) {
         let buf = null
         try {
           buf = await downloadImage(url)
@@ -1843,7 +1843,7 @@ const adapter = new (class DouYinAdapter {
         }
         if (!buf) continue
         try {
-          await this.sendShareImage(id, data, buf)
+          await this.sendShareImage(id, data, buf, imageIndex + 1)
         } catch (err) {
           Bot.makeLog("warn", [`分享作品图片回传失败：${err?.message || err}`], id)
         }
@@ -1910,17 +1910,30 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  // 分享作品图片回传：图片消息进入审核或发送失败时补发图片附件，保证对方能取到原图
-  async sendShareImage(id, data, buf) {
-    const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "image", image: { source: buf } })
-    if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
-    const checkCode = ret.checkCode ?? 0
-    Bot.makeLog("info", `分享作品图片已回传（${buf.length}B${checkCode ? `，审核码 ${checkCode}` : ""}）`, id)
-    if (!checkCode && config.bot.shareVideoImageFile !== true) return
+  // 分享作品图片回传：图片消息进审核或发送失败时补发图片附件，保证对方能取到原图
+  async sendShareImage(id, data, buf, index = 1) {
     const ext = imageFileExtension(buf)
-    const fileRet = await Bot[id].sdk.msg.send(data.chatId, { type: "file", file: { source: buf, name: `douyin-image.${ext}` } })
+    const name = `douyin-image-${index}.${ext}`
+    let inlineSent = false
+    let checkCode = 0
+    try {
+      const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "image", image: { source: buf } })
+      if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+      inlineSent = true
+      checkCode = ret.checkCode ?? 0
+      const statusMsg = String(ret.statusMsg || "").trim()
+      Bot.makeLog(
+        "info",
+        `分享作品图片已回传（${buf.length}B${checkCode ? `，审核码 ${checkCode}` : ""}${statusMsg ? `，${statusMsg}` : ""}）`,
+        id
+      )
+    } catch (err) {
+      Bot.makeLog("warn", [`分享作品图片消息发送失败：${err?.message || err}`], id)
+    }
+    if (config.bot.shareVideoImageFile !== true && inlineSent && !checkCode) return
+    const fileRet = await Bot[id].sdk.msg.send(data.chatId, { type: "file", file: { source: buf, name } })
     if (fileRet.statusCode) throw new Error(`图片附件发送被拒：statusCode=${fileRet.statusCode} ${fileRet.statusMsg || ""}`)
-    Bot.makeLog("info", `分享作品图片附件已回传（${buf.length}B，${ext}）`, id)
+    Bot.makeLog("info", `分享作品图片附件已回传（${buf.length}B，${name}）`, id)
   }
 
   // 背景音乐直接发文件（mp3/m4a），失败只记日志，不影响原片回传
