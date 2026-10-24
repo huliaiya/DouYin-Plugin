@@ -90,6 +90,44 @@ const SCHEMAS = [
     },
   },
   {
+    label: "分享作品原片",
+    component: "SOFT_GROUP_BEGIN",
+  },
+  {
+    field: "bot.shareVideoReply",
+    label: "收到分享作品回传原片",
+    bottomHelpMessage: "私聊收到抖音分享作品时，解析原片并以视频消息回传",
+    component: "Switch",
+  },
+  {
+    field: "bot.shareVideoCookie",
+    label: "解析用网页 Cookie",
+    bottomHelpMessage:
+      "仅在浏览器登录的抖音网页 Cookie，用于解析作品详情。机器人扫码登录得到的是 IM 会话，网页接口不认该会话；这份 Cookie 不要用于机器人登录",
+    component: "InputPassword",
+    componentProps: {
+      placeholder: "浏览器 DouYin 网页 cookie 字符串",
+    },
+  },
+  {
+    field: "bot.shareVideoApi",
+    label: "解析服务地址",
+    bottomHelpMessage: "外部解析服务地址，留空则只用内置解析。插件会把上面这份 Cookie 随请求发送给该服务",
+    component: "Input",
+    componentProps: {
+      placeholder: "https://api.example.com/douyin.php",
+    },
+  },
+  {
+    field: "bot.shareVideoApiToken",
+    label: "解析服务令牌",
+    bottomHelpMessage: "解析服务启用访问令牌校验时填写",
+    component: "InputPassword",
+    componentProps: {
+      placeholder: "留空表示不校验",
+    },
+  },
+  {
     label: "权限与安全",
     component: "SOFT_GROUP_BEGIN",
   },
