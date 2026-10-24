@@ -30,6 +30,7 @@ const DESKTOP_UA =
 
 // 媒体域名白名单、请求约束与校验逻辑集中在 lib/guard.js，便于独立测试
 import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } from "./lib/guard.js"
+import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isLoginRiskError, loginRiskHint } from "./lib/login-error.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
@@ -57,28 +58,9 @@ function imageContentType(buf) {
 
 const { config, configSave } = await makeConfig(
   "DouYin",
+  structuredClone(DEFAULT_CONFIG),
   {
-    tips: "",
-    permission: "master",
-    bot: {
-      timeout: 30000,
-      // 收到消息后自动标记已读（对方可见已读回执）
-      autoRead: true,
-      // 上报在线状态（对方可见在线）
-      activeStatus: true,
-      // 合并转发渲染为图片发送（默认开启）：抖音 forward 卡片需引用会话内真实消息，
-      // 纯生成内容节点无真实消息 id 时预览/展开异常，转图片更稳定；关闭则走 SDK 原生 forward 卡片
-      forwardToImage: true,
-    },
-    token: [],
-    // 追加允许访问的媒体域名后缀（抖音官方 CDN 域名已内置白名单，此处用于补充新域名）
-    mediaHostAllowlist: [],
-  },
-  {
-    tips: [
-      "欢迎使用 TRSS-Yunzai DouYin Plugin ! SDK：dmmdekkd",
-      "参考：https://github.com/dmmdekkd/douyin.ts",
-    ],
+    tips: CONFIG_TIPS,
   },
 )
 
