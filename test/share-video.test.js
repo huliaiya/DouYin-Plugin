@@ -2,14 +2,21 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import {
   buildApiQuery,
+  buildCommentListUrl,
   buildItemInfoUrl,
   buildMusicDetailUrl,
   fetchItemInfoDetail,
   fetchItemInfoDetailAuto,
   fetchMusicUrl,
+  fetchTopComments,
   fetchVideoUrlsFromApi,
+  formatComments,
+  formatCount,
+  formatShareMeta,
+  parseMetaFields,
   pickImageUrls,
   pickMusicUrl,
+  pickShareMeta,
   pickVideoUrls,
   registerAnonymousTtwid,
   resetTtwidCache,
@@ -412,4 +419,79 @@ test("作品详情自动解析：两条来源都失败时抛出合并错误", as
     globalThis.fetch = originalFetch
     resetTtwidCache()
   }
+})
+
+test("作品信息：提取作者、文案与互动数据", () => {
+  const meta = pickShareMeta({
+    author: { nickname: "忻城公安" },
+    desc: "谨防二次诈骗",
+    statistics: { play_count: 0, digg_count: 15, comment_count: 218, share_count: 89 },
+  })
+  assert.equal(meta.author, "忻城公安")
+  assert.equal(meta.desc, "谨防二次诈骗")
+  assert.equal(meta.digg, 15)
+  assert.equal(meta.comment, 218)
+  assert.equal(meta.share, 89)
+})
+
+test("作品信息字段：支持英文与中文别名并去重", () => {
+  assert.deepEqual(parseMetaFields("作者, 点赞，comment"), ["author", "digg", "comment"])
+  assert.deepEqual(parseMetaFields("unknown,x"), [])
+})
+
+test("计数缩写：万与亿", () => {
+  assert.equal(formatCount(999), "999")
+  assert.equal(formatCount(12345), "1.2万")
+  assert.equal(formatCount(100000000), "1亿")
+})
+
+test("作品信息文案：按字段顺序输出且播放量缺失显示未知", () => {
+  const text = formatShareMeta(
+    { author: "忻城公安", desc: "谨防二次诈骗", play: 0, digg: 15, comment: 0 },
+    { fields: "author,desc,play,digg,comment" },
+  )
+  assert.equal(text, "作者：忻城公安\n简介：谨防二次诈骗\n播放：未知\n点赞：15\n评论：0")
+})
+
+test("作品信息文案：自定义模板替换变量并支持换行符", () => {
+  const text = formatShareMeta(
+    { author: "别了个别", desc: "文案", play: 12000, digg: 813, comment: 218, share: 89 },
+    { template: "{author}：{desc}\\n播放 {play}｜点赞 {digg}｜评论 {comment}｜分享 {share}" },
+  )
+  assert.equal(text, "别了个别：文案\n播放 1.2万｜点赞 813｜评论 218｜分享 89")
+})
+
+test("评论列表请求地址：携带作品编号与条数", () => {
+  const url = new URL(buildCommentListUrl("7699880911991506879", 5))
+  assert.equal(url.host, "www.iesdouyin.com")
+  assert.equal(url.pathname, "/web/api/v2/comment/list/")
+  assert.equal(url.searchParams.get("aweme_id"), "7699880911991506879")
+  assert.equal(url.searchParams.get("count"), "5")
+  assert.equal(url.searchParams.get("aid"), "6383")
+})
+
+test("热门评论：解析列表并格式化文案", async () => {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        comments: [
+          { text: "看我有多少台", user: { nickname: "外贸怎么做" }, digg_count: 9 },
+          { text: "好家伙", user: { nickname: "路人" }, digg_count: 0 },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )
+  try {
+    const comments = await fetchTopComments("7699880911991506879", { count: 2, cookie: "ttwid=abc" })
+    assert.equal(comments.length, 2)
+    assert.equal(comments[0].user, "外贸怎么做")
+    assert.equal(formatComments(comments), "热门评论：\n1. 外贸怎么做：看我有多少台（赞 9）\n2. 路人：好家伙")
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("热门评论：无评论时返回空文案", () => {
+  assert.equal(formatComments([]), "")
 })

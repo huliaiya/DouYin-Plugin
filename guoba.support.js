@@ -106,6 +106,47 @@ const SCHEMAS = [
     component: "Switch",
   },
   {
+    field: "bot.shareVideoMeta",
+    label: "附带作品信息",
+    bottomHelpMessage: "回传原片前附带作者、简介、播放、点赞、评论数等信息",
+    component: "Switch",
+  },
+  {
+    field: "bot.shareVideoMetaFields",
+    label: "作品信息字段",
+    bottomHelpMessage:
+      "逗号分隔的展示字段与顺序，可用 author 作者、desc 简介、play 播放、digg 点赞、comment 评论、share 分享、collect 收藏",
+    component: "Input",
+    componentProps: {
+      placeholder: "author,desc,play,digg,comment",
+    },
+  },
+  {
+    field: "bot.shareVideoMetaTemplate",
+    label: "作品信息模板",
+    bottomHelpMessage:
+      "自定义文案模板，变量 {author} {desc} {play} {digg} {comment} {share} {collect}，换行写 \\n；留空使用默认格式",
+    component: "Input",
+    componentProps: {
+      placeholder: "{author}：{desc}\\n播放 {play}｜点赞 {digg}｜评论 {comment}",
+    },
+  },
+  {
+    field: "bot.shareVideoComments",
+    label: "附带热门评论",
+    bottomHelpMessage: "在作品信息后追加作品热门评论内容",
+    component: "Switch",
+  },
+  {
+    field: "bot.shareVideoCommentCount",
+    label: "热门评论条数",
+    bottomHelpMessage: "热门评论条数，1-20",
+    component: "Input",
+    componentProps: {
+      placeholder: "3",
+    },
+  },
+  {
     field: "bot.shareVideoCookie",
     label: "解析用网页 Cookie",
     bottomHelpMessage:

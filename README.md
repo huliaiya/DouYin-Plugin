@@ -104,7 +104,12 @@ cookie 属于敏感凭据：聊天指令会把 cookie 原文写进云崽日志�
 - `bot.activeStatus` 上报在线状态（对方可见在线）
 - `bot.shareVideoReply` 收到抖音分享作品时自动回传原片，默认开启。视频作品回传无水印 mp4，图文作品回传原图
 - `bot.shareVideoMusic` 回传原片或图片时附带作品背景音乐（mp3 文件），默认开启；关闭后只发原片
-- `bot.shareVideoApi` 分享作品解析服务地址，默认 `https://api.huliaiya.icu/API/douyin.php`；置空则使用插件内置解析。接口约定：优先 `POST {地址}` body `{"url":作品ID,"cookie":账号Cookie,"parse_cookie":网页Cookie,"token":访问令牌,"type":"json"}`，失败时回退 `GET {地址}?url={作品ID}&type=json`；返回 `{code:0, video_url, urls[], images[], music_url}`。插件会把当前账号的 Cookie 与网页 Cookie 随 POST 请求发送给该解析服务，解析服务无需自行保存 Cookie
+- `bot.shareVideoMeta` 回传原片前附带作品信息，默认开启。信息含作者名称、简介（作品文案）、播放数、点赞数、评论数、分享数、收藏数
+- `bot.shareVideoMetaFields` 作品信息的展示字段与顺序，逗号分隔，默认 `author,desc,play,digg,comment`；可用字段：`author` 作者、`desc` 简介、`play` 播放、`digg` 点赞、`comment` 评论、`share` 分享、`collect` 收藏，也支持中文别名。抖音网页接口通常不返回播放量，缺失时显示「未知」，可用模板去掉该字段
+- `bot.shareVideoMetaTemplate` 自定义作品信息文案模板，默认空（使用默认格式）。变量 `{author}` `{desc}` `{play}` `{digg}` `{comment}` `{share}` `{collect}`，换行写 `\n`，例如 `{author}：{desc}\n播放 {play}｜点赞 {digg}｜评论 {comment}`
+- `bot.shareVideoComments` 在作品信息后追加热门评论，默认关闭；评论来自抖音网页评论接口，凭网页 Cookie 或匿名 ttwid 获取
+- `bot.shareVideoCommentCount` 热门评论条数，默认 3，可设 1-20
+- `bot.shareVideoApi` 分享作品解析服务地址，默认 `https://api.huliaiya.icu/API/douyin.php`；置空则使用插件内置解析。接口约定：优先 `POST {地址}` body `{"url":作品ID,"cookie":账号Cookie,"parse_cookie":网页Cookie,"token":访问令牌,"type":"json"}`，失败时回退 `GET {地址}?url={作品ID}&type=json`；返回 `{code:0, video_url, urls[], images[], music_url, meta:{author,desc,play,digg,comment,share,collect}}`。插件会把当前账号的 Cookie 与网页 Cookie 随 POST 请求发送给该解析服务，解析服务无需自行保存 Cookie
 - `bot.shareVideoApiToken` 解析服务访问令牌，接口侧启用令牌校验时填写
 - `bot.shareVideoCookie` 专用的抖音网页 Cookie。抖音桌面端 IM 登录会使同一 cookie 的网页会话失效（接口探测返回 `status_code 8`），填写后插件优先用该 Cookie 直连作品详情接口；留空或该 Cookie 失效时，插件自动注册匿名访客标识（ttwid）继续解析，无需任何登录态
 - `token` 账号列表，格式 `uid:cookie`

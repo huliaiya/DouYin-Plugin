@@ -41,8 +41,12 @@ import {
   fetchAppAwemeDetail,
   fetchItemInfoDetailAuto,
   fetchMusicUrl,
+  fetchTopComments,
   fetchVideoUrlsFromApi,
+  formatComments,
+  formatShareMeta,
   pickImageUrls,
+  pickShareMeta,
   pickVideoUrls,
 } from "./lib/share-video.js"
 
@@ -1770,6 +1774,7 @@ const adapter = new (class DouYinAdapter {
     Bot.makeLog("info", `收到分享作品 ${itemId}，开始解析原片`, id)
     const parseCookie = config.bot.shareVideoCookie || ""
     let detail = null
+    let apiMeta = null
     let imageUrls = []
     let videoUrls = []
     let musicUrl = ""
@@ -1793,6 +1798,7 @@ const adapter = new (class DouYinAdapter {
         videoUrls.push(...result.urls)
         imageUrls.push(...result.images)
         if (!musicUrl) musicUrl = result.music || ""
+        apiMeta = result.meta || null
         Bot.makeLog("info", `解析服务 ${api} 返回 ${videoUrls.length} 个视频地址、${imageUrls.length} 张图片`, id)
       } catch (err) {
         Bot.makeLog("warn", [`解析服务 ${api} 调用失败，回退内置解析`, err], id)
@@ -1815,6 +1821,7 @@ const adapter = new (class DouYinAdapter {
       imageUrls.push(...pickImageUrls(detail))
       if (!musicUrl) musicUrl = await this.resolveShareMusic(id, detail, parseCookie)
     }
+    await this.sendShareMeta(id, data, detail ? pickShareMeta(detail) : apiMeta, itemId, parseCookie)
     if (imageUrls.length) {
       for (const url of imageUrls.slice(0, 9)) {
         let buf = null
@@ -1845,6 +1852,38 @@ const adapter = new (class DouYinAdapter {
     if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
     Bot.makeLog("info", `分享作品原片已回传（${buf.length}B）`, id)
     await this.sendShareMusic(id, data, musicUrl, detail)
+  }
+
+  // 作品信息与热门评论：字段、模板与条数均可配置
+  async sendShareMeta(id, data, meta, itemId, parseCookie) {
+    if (config.bot.shareVideoMeta === false) return
+    const parts = []
+    const known = meta && Object.entries(meta).some(([key, value]) => key !== "play" && value !== undefined && value !== "")
+    if (known) {
+      const text = formatShareMeta(meta, {
+        fields: config.bot.shareVideoMetaFields || "author,desc,play,digg,comment",
+        template: config.bot.shareVideoMetaTemplate || "",
+      })
+      if (text) parts.push(text)
+    }
+    if (config.bot.shareVideoComments) {
+      try {
+        const count = Math.min(Math.max(Number(config.bot.shareVideoCommentCount) || 3, 1), 20)
+        const comments = await fetchTopComments(itemId, { count, cookie: parseCookie })
+        const text = formatComments(comments)
+        if (text) parts.push(text)
+      } catch (err) {
+        Bot.makeLog("warn", [`热门评论获取失败：${err?.message || err}`, itemId], id)
+      }
+    }
+    if (!parts.length) return
+    try {
+      const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "text", text: parts.join("\n") })
+      if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+      Bot.makeLog("info", `作品信息已回传（${parts.join("\n").length} 字）`, id)
+    } catch (err) {
+      Bot.makeLog("warn", [`作品信息回传失败：${err?.message || err}`], id)
+    }
   }
 
   // 背景音乐直链：作品详情自带地址优先，缺失时按音乐 mid 查询音乐详情接口
