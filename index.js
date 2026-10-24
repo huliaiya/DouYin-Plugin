@@ -31,6 +31,7 @@ const DESKTOP_UA =
 // 媒体域名白名单、请求约束与校验逻辑集中在 lib/guard.js，便于独立测试
 import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } from "./lib/guard.js"
 import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
+import { isAccountEnabled } from "./lib/account.js"
 import { isLoginRiskError, loginRiskHint } from "./lib/login-error.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
@@ -1264,6 +1265,10 @@ const adapter = new (class DouYinAdapter {
   }
 
   async makeMessage(id, msg) {
+    if (!isAccountEnabled(config.accountEnabled, id)) {
+      Bot.makeLog("debug", "账号已停用，忽略消息", id)
+      return
+    }
     if (!msg.serverMessageId || (msg.conversationType !== 1 && msg.conversationType !== 2)) {
       Bot.makeLog("warn", ["未知消息", msg], id)
       return
@@ -1396,6 +1401,10 @@ const adapter = new (class DouYinAdapter {
   }
 
   async makeNotice(id, event) {
+    if (!isAccountEnabled(config.accountEnabled, id)) {
+      Bot.makeLog("debug", "账号已停用，忽略通知", id)
+      return
+    }
     const data = {
       raw: event,
       bot: Bot[id],
@@ -1544,16 +1553,22 @@ const adapter = new (class DouYinAdapter {
 
   // 消息编辑（编辑重推全文，对自身编辑也触发）：Yunzai 无标准事件，记日志并同步引用缓存
   makeEdited(id, msg) {
+    if (!isAccountEnabled(config.accountEnabled, id)) return
     Bot.makeLog("info", `消息编辑：[${msg.senderNickname}(${msg.senderUid})] ${msg.text}`, id)
     if (msg.serverMessageId && Bot[id].replys[msg.serverMessageId]) Bot[id].replys[msg.serverMessageId] = msg
   }
 
   // 语音/视频来电（仅感知，出站未支持）：Yunzai 无标准事件，仅记日志
   makeVoip(id, event) {
+    if (!isAccountEnabled(config.accountEnabled, id)) return
     Bot.makeLog("info", `${event.cameraOff === 1 ? "语音" : "视频"}来电：${event.callerUid} room=${event.roomId}`, id)
   }
 
   async makeRequest(id, event) {
+    if (!isAccountEnabled(config.accountEnabled, id)) {
+      Bot.makeLog("debug", "账号已停用，忽略申请", id)
+      return
+    }
     const data = {
       raw: event,
       bot: Bot[id],
@@ -1945,7 +1960,12 @@ export class DouYinAdapter extends plugin {
 
   List() {
     this.reply(
-      `共${config.token.length}个账号：\n${config.token.map(i => i.split(/:(.+)/s)[0]).join("\n")}`,
+      `共${config.token.length}个账号：\n${config.token
+        .map(i => {
+          const uid = i.split(/:(.+)/s)[0]
+          return `${uid}${isAccountEnabled(config.accountEnabled, uid) ? "" : "（已停用）"}`
+        })
+        .join("\n")}`,
       true,
     )
   }

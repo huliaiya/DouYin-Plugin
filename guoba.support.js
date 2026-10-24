@@ -3,6 +3,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import YAML from "yaml"
 import { DEFAULT_CONFIG } from "./lib/config-default.js"
+import { parseAccounts, serializeAccounts } from "./lib/account.js"
 
 const PLUGIN_ROOT = path.dirname(fileURLToPath(import.meta.url))
 const CONFIG_FILE = path.resolve(PLUGIN_ROOT, "../../config/DouYin.yaml")
@@ -31,6 +32,13 @@ const SCHEMAS = [
           componentProps: {
             placeholder: "抖音 UID",
           },
+        },
+        {
+          field: "enabled",
+          label: "启用",
+          bottomHelpMessage: "关闭后该账号不响应任何消息与指令，只保持在线",
+          component: "Switch",
+          defaultValue: true,
         },
         {
           field: "cookie",
@@ -112,30 +120,12 @@ function setPath(target, keyPath, value) {
   cursor[parts[parts.length - 1]] = value
 }
 
-function parseTokenList(tokens) {
-  if (!Array.isArray(tokens)) return []
-  return tokens
-    .map(item => {
-      if (item && typeof item === "object") {
-        return { uid: String(item.uid ?? ""), cookie: String(item.cookie ?? "") }
-      }
-      const text = String(item ?? "")
-      const idx = text.indexOf(":")
-      return idx > -1 ? { uid: text.slice(0, idx), cookie: text.slice(idx + 1) } : { uid: text, cookie: "" }
-    })
-    .filter(item => item.uid || item.cookie)
+function parseTokenList(tokens, accountEnabled) {
+  return parseAccounts(tokens, accountEnabled)
 }
 
 function stringifyTokenList(list) {
-  if (!Array.isArray(list)) return []
-  return list
-    .map(item => {
-      const uid = String(item?.uid ?? "").trim()
-      const cookie = String(item?.cookie ?? "").trim()
-      if (!uid) return ""
-      return cookie ? `${uid}:${cookie}` : uid
-    })
-    .filter(Boolean)
+  return serializeAccounts(list)
 }
 
 async function readConfig() {
@@ -175,14 +165,20 @@ export function supportGuoba() {
           ...structuredClone(DEFAULT_CONFIG),
           ...config,
           bot: { ...DEFAULT_CONFIG.bot, ...(config.bot ?? {}) },
-          token: parseTokenList(config.token),
+          token: parseTokenList(config.token, config.accountEnabled),
         }
       },
       async setConfigData(data, { Result }) {
         const config = await readConfig()
         for (const [key, value] of Object.entries(data ?? {})) {
           if (!key) continue
-          setPath(config, key, key === "token" ? stringifyTokenList(value) : value)
+          if (key === "token") {
+            const accounts = stringifyTokenList(value)
+            setPath(config, "token", accounts.token)
+            setPath(config, "accountEnabled", accounts.accountEnabled)
+            continue
+          }
+          setPath(config, key, value)
         }
         await writeConfig(config)
         return Result.ok({}, "保存成功~")
