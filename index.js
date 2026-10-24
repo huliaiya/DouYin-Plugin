@@ -33,7 +33,7 @@ import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } fr
 import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
 import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
-import { isLoginRiskError, loginRiskHint } from "./lib/login-error.js"
+import { isLoginRiskError, isSessionLostError, loginRiskHint, sessionLostHint } from "./lib/login-error.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -645,6 +645,9 @@ const adapter = new (class DouYinAdapter {
       const message = String(err?.message || err)
       if (/upload credentials unavailable/i.test(message)) {
         throw new Error("媒体上传凭据获取失败：登录态已失效或触发风控，请重新扫码登录（#抖音bot登录）")
+      }
+      if (isSessionLostError(message)) {
+        throw new Error(`发送失败：${sessionLostHint()}`)
       }
       throw err
     }
@@ -1658,6 +1661,51 @@ const adapter = new (class DouYinAdapter {
     else this.reconnect(id)
   }
 
+  // 网页版 cookie 在 IM 登录后网页会话会被抖音注销，upload/config/v2 随之失效，
+  // 连接成功后立即取一次 STS 凭据缓存，上传时复用；缓存失效时回源一次并重试。
+  async prepareMedia(id, sdk) {
+    let uploader
+    try {
+      uploader = sdk.im?.()?.uploader
+    } catch {
+      return
+    }
+    const originalCredentials = uploader?.credentials?.bind(uploader)
+    if (!uploader || typeof originalCredentials !== "function") return
+
+    const cache = { credentials: null, at: 0 }
+    const TTL = 30 * 60 * 1000
+    uploader.credentials = async (...args) => {
+      if (cache.credentials && Date.now() - cache.at < TTL) return cache.credentials
+      const credentials = await originalCredentials(...args)
+      cache.credentials = credentials
+      cache.at = Date.now()
+      return credentials
+    }
+
+    for (const method of ["uploadImage", "uploadVideo", "uploadFile"]) {
+      const original = uploader[method]?.bind(uploader)
+      if (typeof original !== "function") continue
+      uploader[method] = async (...args) => {
+        try {
+          return await original(...args)
+        } catch (err) {
+          if (!cache.credentials) throw err
+          cache.credentials = null
+          cache.at = 0
+          return await original(...args)
+        }
+      }
+    }
+
+    try {
+      await uploader.credentials()
+      Bot.makeLog("info", `${id} 媒体上传凭据已缓存`, id)
+    } catch (err) {
+      Bot.makeLog("warn", `${id} 媒体上传凭据获取失败，图片/视频发送可能不可用：${err?.message || err}`, id)
+    }
+  }
+
   async connect(token) {
     const [id, cookie] = token.split(/:(.+)/s)
     if (!id || !cookie) {
@@ -1692,6 +1740,7 @@ const adapter = new (class DouYinAdapter {
       await sdk.start()
       // 取回本次使用的设备身份并落盘，供下次构造/登录复用，避免重复注册
       this.saveDevice(id, sdk.device)
+      await this.prepareMedia(id, sdk)
       // cookie 校验只用一次「群列表」（原生通道 listNativeGroups）：cookie 失效时首个请求即返回
       // unexpected session length 并抛错（无重试），秒级失败，账号在注册 Bot[id] 前被挡下；
       // 校验通过时该结果直接用于群缓存，避免与 loadGroup 重复全量翻页。
