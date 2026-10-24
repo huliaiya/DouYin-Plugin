@@ -30,6 +30,7 @@ const DESKTOP_UA =
 
 // 媒体域名白名单、请求约束与校验逻辑集中在 lib/guard.js，便于独立测试
 import { allowedMediaUrl, limitStream, MEDIA_FETCH_TIMEOUT, MEDIA_MAX_BYTES } from "./lib/guard.js"
+import { isLoginRiskError, loginRiskHint } from "./lib/login-error.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -2017,7 +2018,12 @@ export class DouYinAdapter extends plugin {
       this.reply("账号连接失败", true)
       return false
     } catch (err) {
-      this.reply(`登录失败：${err.message || err}`, true)
+      const message = err.message || String(err)
+      if (isLoginRiskError(message)) {
+        this.reply(`登录失败：${message}\n${loginRiskHint()}`, true)
+        return false
+      }
+      this.reply(`登录失败：${message}`, true)
       return false
     } finally {
       adapter.logining = false

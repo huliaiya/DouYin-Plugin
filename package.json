@@ -20,7 +20,7 @@
     "adapter"
   ],
   "scripts": {
-    "test": "node --test test/guard.test.js"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "douyin.ts": "^0.6.7",
