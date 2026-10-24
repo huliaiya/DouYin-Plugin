@@ -15,10 +15,33 @@ const SCHEMAS = [
   {
     field: "token",
     label: "账号列表",
-    bottomHelpMessage: "格式 uid:cookie，一行一个账号。扫码登录成功后插件会自动写入，删除某一项则自动断开该账号",
-    component: "GTags",
+    bottomHelpMessage: "每个账号填写 UID 与 Cookie 两项，点击行内「编辑」修改。扫码登录成功后插件会自动写入，删除某一条会断开该账号",
+    component: "GSubForm",
     componentProps: {
-      placeholder: "uid:cookie",
+      multiple: true,
+      modalProps: {
+        title: "账号",
+      },
+      schemas: [
+        {
+          field: "uid",
+          label: "UID",
+          bottomHelpMessage: "抖音账号 UID",
+          component: "Input",
+          componentProps: {
+            placeholder: "抖音 UID",
+          },
+        },
+        {
+          field: "cookie",
+          label: "Cookie",
+          bottomHelpMessage: "该 UID 对应的登录 cookie",
+          component: "InputPassword",
+          componentProps: {
+            placeholder: "账号 cookie",
+          },
+        },
+      ],
     },
   },
   {
@@ -89,6 +112,32 @@ function setPath(target, keyPath, value) {
   cursor[parts[parts.length - 1]] = value
 }
 
+function parseTokenList(tokens) {
+  if (!Array.isArray(tokens)) return []
+  return tokens
+    .map(item => {
+      if (item && typeof item === "object") {
+        return { uid: String(item.uid ?? ""), cookie: String(item.cookie ?? "") }
+      }
+      const text = String(item ?? "")
+      const idx = text.indexOf(":")
+      return idx > -1 ? { uid: text.slice(0, idx), cookie: text.slice(idx + 1) } : { uid: text, cookie: "" }
+    })
+    .filter(item => item.uid || item.cookie)
+}
+
+function stringifyTokenList(list) {
+  if (!Array.isArray(list)) return []
+  return list
+    .map(item => {
+      const uid = String(item?.uid ?? "").trim()
+      const cookie = String(item?.cookie ?? "").trim()
+      if (!uid) return ""
+      return cookie ? `${uid}:${cookie}` : uid
+    })
+    .filter(Boolean)
+}
+
 async function readConfig() {
   try {
     const raw = await fs.readFile(CONFIG_FILE, "utf8")
@@ -126,13 +175,14 @@ export function supportGuoba() {
           ...structuredClone(DEFAULT_CONFIG),
           ...config,
           bot: { ...DEFAULT_CONFIG.bot, ...(config.bot ?? {}) },
+          token: parseTokenList(config.token),
         }
       },
       async setConfigData(data, { Result }) {
         const config = await readConfig()
         for (const [key, value] of Object.entries(data ?? {})) {
           if (!key) continue
-          setPath(config, key, value)
+          setPath(config, key, key === "token" ? stringifyTokenList(value) : value)
         }
         await writeConfig(config)
         return Result.ok({}, "保存成功~")
