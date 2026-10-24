@@ -13,6 +13,7 @@ import {
   formatComments,
   formatCount,
   formatShareMeta,
+  imageFileExtension,
   musicFileExtension,
   parseMetaFields,
   pickImageUrls,
@@ -217,6 +218,14 @@ test("音乐容器类型：ID3 与 MPEG 帧头识别为 mp3，ftyp 盒识别为 
   assert.equal(musicFileExtension(Buffer.from("fffb9004000000000000", "hex")), "mp3")
   assert.equal(musicFileExtension(Buffer.from("0000001c667479704d344120", "hex")), "m4a")
   assert.equal(musicFileExtension(Buffer.alloc(0)), "mp3")
+})
+
+test("图片容器类型：按文件头识别 jpg/png/webp/gif", () => {
+  assert.equal(imageFileExtension(Buffer.from("ffd8ffe000104a464946", "hex")), "jpg")
+  assert.equal(imageFileExtension(Buffer.from("89504e470d0a1a0a", "hex")), "png")
+  assert.equal(imageFileExtension(Buffer.from("474946383961", "hex")), "gif")
+  assert.equal(imageFileExtension(Buffer.from("524946460000000057454250", "hex")), "webp")
+  assert.equal(imageFileExtension(Buffer.alloc(0)), "jpg")
 })
 
 test("音乐详情请求地址：携带音乐编号", () => {

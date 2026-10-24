@@ -102,7 +102,13 @@ const SCHEMAS = [
   {
     field: "bot.shareVideoMusic",
     label: "附带背景音乐",
-    bottomHelpMessage: "回传原片或图片时，额外把作品背景音乐以 mp3 文件发出",
+    bottomHelpMessage: "回传原片或图片时，额外把作品背景音乐以 mp3/m4a 文件发出",
+    component: "Switch",
+  },
+  {
+    field: "bot.shareVideoImageFile",
+    label: "图片同时发附件",
+    bottomHelpMessage: "图文作品的图片除图片消息外再发一份图片附件，图片消息被审核或客户端不展示时用附件取原图",
     component: "Switch",
   },
   {

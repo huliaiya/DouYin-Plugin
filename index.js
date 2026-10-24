@@ -45,6 +45,7 @@ import {
   fetchVideoUrlsFromApi,
   formatComments,
   formatShareMeta,
+  imageFileExtension,
   musicFileExtension,
   pickImageUrls,
   pickShareMeta,
@@ -156,10 +157,14 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  saveUploadCred(id, credentials) {
+  saveUploadCred(id, credentials, configKey = "public_image_config") {
     try {
       mkdirSync(path.dirname(this.uploadCredFile(id)), { recursive: true })
-      writeFileSync(this.uploadCredFile(id), JSON.stringify({ ...credentials, at: Date.now() }))
+      const saved = this.loadUploadCred(id) ?? {}
+      const payload = { ...saved }
+      if (configKey === "public_file_config") payload.file = { ...credentials, at: Date.now() }
+      else Object.assign(payload, credentials, { at: Date.now() })
+      writeFileSync(this.uploadCredFile(id), JSON.stringify(payload))
     } catch (err) {
       Bot.makeLog("debug", ["上传凭据落盘失败", id, err], this.id)
     }
@@ -1722,6 +1727,7 @@ const adapter = new (class DouYinAdapter {
     // 凭据按 configKey 分开缓存：图片走 public_image_config，文件走 public_file_config，两者不可混用
     const cache = new Map()
     if (saved?.accessKeyId) cache.set("public_image_config", { credentials: saved, at: saved.at ?? 0 })
+    if (saved?.file?.accessKeyId) cache.set("public_file_config", { credentials: saved.file, at: saved.file.at ?? 0 })
     const TTL = 30 * 60 * 1000
     uploader.credentials = async (...args) => {
       const configKey = args[0] ?? "public_image_config"
@@ -1729,7 +1735,7 @@ const adapter = new (class DouYinAdapter {
       if (hit && Date.now() - hit.at < TTL) return hit.credentials
       const credentials = await originalCredentials(...args)
       cache.set(configKey, { credentials, at: Date.now() })
-      if (configKey === "public_image_config") this.saveUploadCred(id, credentials)
+      this.saveUploadCred(id, credentials, configKey)
       return credentials
     }
 
@@ -1740,21 +1746,25 @@ const adapter = new (class DouYinAdapter {
         try {
           return await original(...args)
         } catch (err) {
-          if (!cache.credentials) throw err
-          cache.credentials = null
-          cache.at = 0
+          // 缓存凭据过期时清空缓存重试一次，走回源获取新凭据
+          const hasCached = [...cache.values()].some(entry => entry.credentials)
+          if (!hasCached) throw err
+          for (const [key, entry] of cache) cache.set(key, { ...entry, at: 0 })
           return await original(...args)
         }
       }
     }
 
-    try {
-      await uploader.credentials()
-      Bot.makeLog("info", `${id} 媒体上传凭据已缓存`, id)
-    } catch (err) {
-      if (cache.credentials)
-        Bot.makeLog("warn", `${id} 媒体上传凭据获取失败，沿用已落盘凭据：${err?.message || err}`, id)
-      else Bot.makeLog("warn", `${id} 媒体上传凭据获取失败，图片/视频发送可能不可用：${err?.message || err}`, id)
+    // 连接后立即取图片与文件两套凭据：网页会话随后失效，背景音乐与图片附件同样需要上传凭据
+    for (const configKey of ["public_image_config", "public_file_config"]) {
+      try {
+        await uploader.credentials(configKey)
+        Bot.makeLog("info", `${id} ${configKey} 上传凭据已缓存`, id)
+      } catch (err) {
+        const cached = cache.get(configKey)
+        if (cached?.credentials) Bot.makeLog("warn", `${id} ${configKey} 上传凭据获取失败，沿用已落盘凭据：${err?.message || err}`, id)
+        else Bot.makeLog("warn", `${id} ${configKey} 上传凭据获取失败，相关媒体发送可能不可用：${err?.message || err}`, id)
+      }
     }
   }
 
@@ -1832,9 +1842,11 @@ const adapter = new (class DouYinAdapter {
           Bot.makeLog("debug", ["图片下载失败", err], id)
         }
         if (!buf) continue
-        const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "image", image: { source: buf } })
-        if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
-        Bot.makeLog("info", `分享作品图片已回传（${buf.length}B）`, id)
+        try {
+          await this.sendShareImage(id, data, buf)
+        } catch (err) {
+          Bot.makeLog("warn", [`分享作品图片回传失败：${err?.message || err}`], id)
+        }
       }
       await this.sendShareMusic(id, data, musicUrl, detail)
       return
@@ -1896,6 +1908,19 @@ const adapter = new (class DouYinAdapter {
       Bot.makeLog("debug", ["背景音乐地址获取失败", err], id)
       return ""
     }
+  }
+
+  // 分享作品图片回传：图片消息进入审核或发送失败时补发图片附件，保证对方能取到原图
+  async sendShareImage(id, data, buf) {
+    const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "image", image: { source: buf } })
+    if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+    const checkCode = ret.checkCode ?? 0
+    Bot.makeLog("info", `分享作品图片已回传（${buf.length}B${checkCode ? `，审核码 ${checkCode}` : ""}）`, id)
+    if (!checkCode && config.bot.shareVideoImageFile !== true) return
+    const ext = imageFileExtension(buf)
+    const fileRet = await Bot[id].sdk.msg.send(data.chatId, { type: "file", file: { source: buf, name: `douyin-image.${ext}` } })
+    if (fileRet.statusCode) throw new Error(`图片附件发送被拒：statusCode=${fileRet.statusCode} ${fileRet.statusMsg || ""}`)
+    Bot.makeLog("info", `分享作品图片附件已回传（${buf.length}B，${ext}）`, id)
   }
 
   // 背景音乐直接发文件（mp3/m4a），失败只记日志，不影响原片回传
