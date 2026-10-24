@@ -1740,6 +1740,15 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
+  // 取账号当前 cookie：优先 SDK cookie jar（含登录后自动续期的 sessionid/msToken），回退账号配置
+  getAccountCookie(id) {
+    try {
+      const live = Bot[id]?.sdk?.http?.()?.jar?.header?.()
+      if (live) return live
+    } catch {}
+    return Bot[id]?.getCookies?.() || ""
+  }
+
   // 分享视频原片回传：优先走外部解析服务，失败回退内置详情解析；下载视频字节后以视频消息发回原会话
   async replyShareVideo(id, data, msg) {
     const itemId = msg?.share?.itemId
@@ -1751,7 +1760,7 @@ const adapter = new (class DouYinAdapter {
       try {
         urls.push(
           ...(await fetchVideoUrlsFromApi(api, itemId, {
-            cookie: Bot[id].sdk.getCookies?.() || "",
+            cookie: this.getAccountCookie(id),
             token: config.bot.shareVideoApiToken || "",
           })),
         )
