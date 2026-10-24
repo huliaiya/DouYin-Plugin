@@ -265,6 +265,45 @@ const adapter = new (class DouYinAdapter {
     return { error: "too many redirects" }
   }
 
+  // 未识别消息兜底：服务端可能把图片资源换成字符串、或塞在非常规字段，尽力恢复成图片段
+  recoverImageFromRaw(msg, uin) {
+    const asRecord = value => {
+      if (typeof value === "string") {
+        try {
+          return JSON.parse(value)
+        } catch {
+          return undefined
+        }
+      }
+      return value && typeof value === "object" && !Array.isArray(value) ? value : undefined
+    }
+    const raw = asRecord(msg.raw) || {}
+    for (const source of [raw.resource_url, raw.image, raw.poster, raw]) {
+      const candidate = asRecord(source)
+      if (!candidate) continue
+      const urls = name => (Array.isArray(candidate[name]) ? candidate[name].filter(i => typeof i === "string") : [])
+      const url =
+        urls("origin_url_list")[0] || urls("large_url_list")[0] || urls("medium_url_list")[0] ||
+        urls("thumb_url_list")[0] || urls("url_list")[0]
+      if (!url) continue
+      const skey = String(candidate.skey ?? "")
+      const resource = {
+        oid: String(candidate.oid ?? candidate.uri ?? ""),
+        skey,
+        md5: String(candidate.md5 ?? ""),
+        dataSize: Number(candidate.data_size ?? 0),
+        width: Number(raw.cover_width ?? candidate.width ?? 0),
+        height: Number(raw.cover_height ?? candidate.height ?? 0),
+        originUrls: urls("origin_url_list"),
+        largeUrls: urls("large_url_list"),
+        mediumUrls: urls("medium_url_list"),
+        thumbUrls: urls("thumb_url_list"),
+      }
+      return { type: "image", file: skey ? this.resourceUrl(url, uin, skey) : url, resource }
+    }
+    return undefined
+  }
+
   // 消息 → 消息段数组 + 日志用 raw_message：与 OPQBot/GSUIDCore 接收侧一致，组装 message 段时同步拼接
   // raw_message，每种消息类型带一个基本信息标记（如 [图片:url] / [视频:摘要] / [文件:名称] / [语音:摘要]），
   // 日志只打 raw_message，避免把带 resource 的自定义段整体序列化刷屏
@@ -364,7 +403,23 @@ const adapter = new (class DouYinAdapter {
           raw += msg.text
         }
         break
-      default:
+      default: {
+        // 未识别消息：先尝试恢复图片资源，恢复不了再透传原始消息体，并记录原始内容便于排查
+        if (msg.type === "unknown") {
+          const recovered = this.recoverImageFromRaw(msg, uin)
+          if (recovered) {
+            message.push(recovered)
+            raw += `[图片:${recovered.file}]`
+            break
+          }
+          let dump = ""
+          try {
+            dump = JSON.stringify(msg.raw ?? {})
+          } catch {
+            dump = String(msg.raw ?? "")
+          }
+          Bot.makeLog("info", `未识别消息原始内容：${dump.slice(0, 600)}`, uin)
+        }
         // 卡片/分享/链接/名片/接龙/合并转发/未知等：透传原始消息体，raw 取标题/人数等基本信息概括
         message.push({ type: "raw", data: msg })
         const label = { forward: "聊天记录", chains: "接龙", link: "链接", share: "分享", userCard: "名片", card: "卡片", groupCard: "群邀请", unknown: "未知消息" }[msg.type] || msg.type
@@ -381,6 +436,7 @@ const adapter = new (class DouYinAdapter {
           message.push({ type: "text", text: msg.text })
           raw += msg.text
         }
+      }
     }
     return { message, raw }
   }
@@ -676,12 +732,26 @@ const adapter = new (class DouYinAdapter {
 
   // 发送单条消息体（reply 优先走引用回复），statusCode 非 0 抛错由调用方统一处理
   // 引用回复透传完整 body：SDK 0.6.7 起支持引用任意类型消息（图片/视频/文件等），@提及/@所有人随 body 一并生效
+  // 图片消息被拒或返回审核码时，改发同图文件：文件通道（messageType=6）实测可稳定送达
   async sendBody(data, { reply, body }) {
     try {
-      const ret = reply
+      let ret = reply
         ? await data.bot.sdk.msg.reply(data.chatId, reply, body)
         : await data.bot.sdk.msg.send(data.chatId, body)
       Bot.makeLog("debug", ["发送消息返回", ret], data.self_id)
+      if (body.type === "image" && (ret.statusCode || ret.checkCode)) {
+        const source = body.image?.source ?? body.image
+        if (Buffer.isBuffer(source) || source instanceof Uint8Array) {
+          const buf = Buffer.from(source)
+          const name = `image.${imageFileExtension(buf)}`
+          const fileRet = await data.bot.sdk.msg.send(data.chatId, { type: "file", file: { source: buf, name } })
+          if (!fileRet.statusCode) {
+            const reason = ret.checkCode ? `审核码 ${ret.checkCode}` : `statusCode ${ret.statusCode}`
+            Bot.makeLog("info", `图片消息未通过（${reason}），已改发图片附件 ${name}`, data.self_id)
+            ret = fileRet
+          }
+        }
+      }
       if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
       return ret
     } catch (err) {
