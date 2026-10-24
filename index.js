@@ -34,7 +34,15 @@ import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
 import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 import { isLoginRiskError, isSessionLostError, loginRiskHint, sessionLostHint } from "./lib/login-error.js"
-import { downloadVideo, fetchAppAwemeDetail, fetchVideoUrlsFromApi, fetchWebAwemeDetail, pickVideoUrls } from "./lib/share-video.js"
+import {
+  downloadImage,
+  downloadVideo,
+  fetchAppAwemeDetail,
+  fetchItemInfoDetail,
+  fetchVideoUrlsFromApi,
+  pickImageUrls,
+  pickVideoUrls,
+} from "./lib/share-video.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -1749,39 +1757,41 @@ const adapter = new (class DouYinAdapter {
     return Bot[id]?.getCookies?.() || ""
   }
 
-  // 分享视频原片回传：优先专用网页 cookie 走内置详情接口，其次外部解析服务，最后账号 cookie 与 App 兜底
+  // 分享作品原片回传：专用网页 cookie 走 iteminfo 详情接口，其次外部解析服务，最后账号 cookie 与 App 兜底
   async replyShareVideo(id, data, msg) {
     const itemId = msg?.share?.itemId
     if (!itemId) return
     Bot.makeLog("info", `收到分享作品 ${itemId}，开始解析原片`, id)
-    const urls = []
     const parseCookie = config.bot.shareVideoCookie || ""
+    let detail = null
+    let imageUrls = []
+    let videoUrls = []
     if (parseCookie) {
       try {
-        const detail = await fetchWebAwemeDetail(Bot[id].sdk, itemId, parseCookie)
-        urls.push(...pickVideoUrls(detail))
-        Bot.makeLog("info", `专用网页 cookie 解析成功，得到 ${urls.length} 个地址`, id)
+        detail = await fetchItemInfoDetail(itemId, parseCookie)
+        videoUrls = pickVideoUrls(detail)
+        imageUrls = pickImageUrls(detail)
+        Bot.makeLog("info", `作品详情解析成功（视频 ${videoUrls.length} 个地址，图片 ${imageUrls.length} 张）`, id)
       } catch (err) {
-        Bot.makeLog("warn", [`专用网页 cookie 解析失败：${err?.message || err}`, itemId], id)
+        Bot.makeLog("warn", [`网页 cookie 解析作品详情失败：${err?.message || err}`, itemId], id)
       }
     }
     const api = config.bot.shareVideoApi
-    if (!urls.length && api) {
+    if (!detail && api) {
       try {
-        urls.push(
-          ...(await fetchVideoUrlsFromApi(api, itemId, {
-            cookie: this.getAccountCookie(id),
-            parseCookie,
-            token: config.bot.shareVideoApiToken || "",
-          })),
-        )
-        Bot.makeLog("info", `解析服务 ${api} 返回 ${urls.length} 个地址`, id)
+        const result = await fetchVideoUrlsFromApi(api, itemId, {
+          cookie: this.getAccountCookie(id),
+          parseCookie,
+          token: config.bot.shareVideoApiToken || "",
+        })
+        videoUrls.push(...result.urls)
+        imageUrls.push(...result.images)
+        Bot.makeLog("info", `解析服务 ${api} 返回 ${videoUrls.length} 个视频地址、${imageUrls.length} 张图片`, id)
       } catch (err) {
         Bot.makeLog("warn", [`解析服务 ${api} 调用失败，回退内置解析`, err], id)
       }
     }
-    if (!urls.length) {
-      let detail = null
+    if (!detail && !videoUrls.length && !imageUrls.length) {
       try {
         detail = (await Bot[id].sdk.media.awemeDetail([itemId]))?.[0] ?? null
       } catch (err) {
@@ -1794,10 +1804,26 @@ const adapter = new (class DouYinAdapter {
           Bot.makeLog("warn", [`作品详情(App)获取失败：${err?.message || err}`, itemId], id)
         }
       }
-      urls.push(...pickVideoUrls(detail))
+      videoUrls.push(...pickVideoUrls(detail))
+      imageUrls.push(...pickImageUrls(detail))
+    }
+    if (imageUrls.length) {
+      for (const url of imageUrls.slice(0, 9)) {
+        let buf = null
+        try {
+          buf = await downloadImage(url)
+        } catch (err) {
+          Bot.makeLog("debug", ["图片下载失败", err], id)
+        }
+        if (!buf) continue
+        const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "image", image: { source: buf } })
+        if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+        Bot.makeLog("info", `分享作品图片已回传（${buf.length}B）`, id)
+      }
+      return
     }
     let buf = null
-    for (const url of urls) {
+    for (const url of videoUrls) {
       try {
         buf = await downloadVideo(url)
         break
