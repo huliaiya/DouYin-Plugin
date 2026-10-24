@@ -103,7 +103,8 @@ cookie 属于敏感凭据：聊天指令会把 cookie 原文写进云崽日志�
 - `bot.autoRead` 收到消息后自动标记已读（对方可见已读回执）
 - `bot.activeStatus` 上报在线状态（对方可见在线）
 - `bot.shareVideoReply` 收到抖音分享作品时自动回传原片视频，默认开启
-- `bot.shareVideoApi` 分享作品解析服务地址，默认 `https://api.huliaiya.icu/API/douyin.php`；置空则使用插件内置解析。接口约定：`GET {地址}?url={作品ID}&type=json`，返回 `{code:0, video_url, urls[]}`
+- `bot.shareVideoApi` 分享作品解析服务地址，默认 `https://api.huliaiya.icu/API/douyin.php`；置空则使用插件内置解析。接口约定：优先 `POST {地址}` body `{"url":作品ID,"cookie":账号Cookie,"token":访问令牌,"type":"json"}`，失败时回退 `GET {地址}?url={作品ID}&type=json`；返回 `{code:0, video_url, urls[]}`。插件会把当前账号的 Cookie 随 POST 请求发送给该解析服务，解析服务无需自行保存 Cookie
+- `bot.shareVideoApiToken` 解析服务访问令牌，接口侧启用令牌校验时填写
 - `token` 账号列表，格式 `uid:cookie`
 - `accountEnabled` 账号启用状态映射，值为 `false` 的 UID 处于停用状态（默认全部启用，只记录停用项）
 - `mediaHostAllowlist` 媒体下载域名白名单的附加后缀，默认空（仅放行抖音官方 CDN 域名）

@@ -1749,7 +1749,12 @@ const adapter = new (class DouYinAdapter {
     const api = config.bot.shareVideoApi
     if (api) {
       try {
-        urls.push(...(await fetchVideoUrlsFromApi(api, itemId)))
+        urls.push(
+          ...(await fetchVideoUrlsFromApi(api, itemId, {
+            cookie: Bot[id].sdk.getCookies?.() || "",
+            token: config.bot.shareVideoApiToken || "",
+          })),
+        )
         Bot.makeLog("info", `解析服务 ${api} 返回 ${urls.length} 个地址`, id)
       } catch (err) {
         Bot.makeLog("warn", [`解析服务 ${api} 调用失败，回退内置解析`, err], id)
