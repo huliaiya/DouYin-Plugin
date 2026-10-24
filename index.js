@@ -34,7 +34,7 @@ import { DEFAULT_CONFIG, CONFIG_TIPS } from "./lib/config-default.js"
 import { isAccountEnabled } from "./lib/account.js"
 import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cookie-login.js"
 import { isLoginRiskError, isSessionLostError, loginRiskHint, sessionLostHint } from "./lib/login-error.js"
-import { downloadVideo, fetchAppAwemeDetail, pickVideoUrls } from "./lib/share-video.js"
+import { downloadVideo, fetchAppAwemeDetail, fetchVideoUrlsFromApi, pickVideoUrls } from "./lib/share-video.js"
 
 // AES-256-GCM 解密抖音图片：前 12 字节 IV + 密文 + 后 16 字节 AuthTag，密钥为消息图片 skey（64 hex）
 function decryptImage(buf, skey) {
@@ -1740,20 +1740,33 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  // 分享视频原片回传：取作品播放地址下载视频字节，再以视频消息发回原会话
+  // 分享视频原片回传：优先走外部解析服务，失败回退内置详情解析；下载视频字节后以视频消息发回原会话
   async replyShareVideo(id, data, msg) {
     const itemId = msg?.share?.itemId
     if (!itemId) return
     Bot.makeLog("info", `收到分享作品 ${itemId}，开始解析原片`, id)
-    let detail = null
-    try {
-      detail = (await Bot[id].sdk.media.awemeDetail([itemId]))?.[0] ?? null
-    } catch (err) {
-      Bot.makeLog("debug", ["作品详情(web)获取失败", err], id)
+    const urls = []
+    const api = config.bot.shareVideoApi
+    if (api) {
+      try {
+        urls.push(...(await fetchVideoUrlsFromApi(api, itemId)))
+        Bot.makeLog("info", `解析服务 ${api} 返回 ${urls.length} 个地址`, id)
+      } catch (err) {
+        Bot.makeLog("warn", [`解析服务 ${api} 调用失败，回退内置解析`, err], id)
+      }
     }
-    if (!detail) detail = await fetchAppAwemeDetail(itemId)
+    if (!urls.length) {
+      let detail = null
+      try {
+        detail = (await Bot[id].sdk.media.awemeDetail([itemId]))?.[0] ?? null
+      } catch (err) {
+        Bot.makeLog("debug", ["作品详情(web)获取失败", err], id)
+      }
+      if (!detail) detail = await fetchAppAwemeDetail(itemId)
+      urls.push(...pickVideoUrls(detail))
+    }
     let buf = null
-    for (const url of pickVideoUrls(detail)) {
+    for (const url of urls) {
       try {
         buf = await downloadVideo(url)
         break

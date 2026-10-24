@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { pickVideoUrls } from "../lib/share-video.js"
+import { buildApiQuery, pickVideoUrls } from "../lib/share-video.js"
 
 test("播放地址优先级：无水印接口在前，去重", () => {
   const urls = pickVideoUrls({
@@ -21,4 +21,15 @@ test("播放地址容错：详情为空或字段缺失", () => {
   assert.deepEqual(pickVideoUrls(undefined), [])
   assert.deepEqual(pickVideoUrls({}), [])
   assert.deepEqual(pickVideoUrls({ video: { play_addr: { url_list: ["not-a-url"] } } }), [])
+})
+
+test("解析服务查询串拼接", () => {
+  assert.equal(
+    buildApiQuery("https://api.huliaiya.icu/API/douyin.php", "7699765354280520969"),
+    "https://api.huliaiya.icu/API/douyin.php?url=7699765354280520969&type=json",
+  )
+  assert.equal(
+    buildApiQuery("https://api.huliaiya.icu/API/douyin.php?token=abc", "123"),
+    "https://api.huliaiya.icu/API/douyin.php?token=abc&url=123&type=json",
+  )
 })
