@@ -13,6 +13,7 @@ import {
   formatComments,
   formatCount,
   formatShareMeta,
+  musicFileExtension,
   parseMetaFields,
   pickImageUrls,
   pickMusicUrl,
@@ -121,6 +122,26 @@ test("播放地址容错：图文作品的背景音乐地址被过滤", () => {
   assert.deepEqual(urls, [])
 })
 
+test("播放地址容错：图文作品的背景音乐对象地址被剔除", () => {
+  const audioUri = "https://sf11-cdn-tos.douyinstatic.com/obj/tos-cn-ve-2774/o8BkrixQYMzZ4iMWmoifjnQI69B4AswYI1IGBA"
+  const urls = pickVideoUrls({
+    aweme_type: 2,
+    video: {
+      play_addr: {
+        uri: audioUri,
+        url_list: [`https://aweme.snssdk.com/aweme/v1/playwm/?video_id=${encodeURIComponent(audioUri)}&ratio=720p&line=0`],
+      },
+    },
+    music: {
+      play_url: {
+        uri: audioUri,
+        url_list: [audioUri, audioUri.replace("sf11-", "sf6-")],
+      },
+    },
+  })
+  assert.deepEqual(urls, [])
+})
+
 test("解析服务查询串拼接", () => {
   assert.equal(
     buildApiQuery("https://api.huliaiya.icu/API/douyin.php", "7699765354280520969"),
@@ -172,6 +193,30 @@ test("背景音乐地址：普通视频作品没有音乐时返回空", () => {
     },
   })
   assert.equal(url, "")
+})
+
+test("背景音乐地址：图文作品取 music.play_url 的无扩展名音频", () => {
+  const url = pickMusicUrl({
+    aweme_type: 2,
+    music: {
+      title: "至美至善进行曲",
+      play_url: {
+        uri: "https://sf11-cdn-tos.douyinstatic.com/obj/tos-cn-ve-2774/o8BkrixQYMzZ4iMWmoifjnQI69B4AswYI1IGBA",
+        url_list: [
+          "https://sf11-cdn-tos.douyinstatic.com/obj/tos-cn-ve-2774/o8BkrixQYMzZ4iMWmoifjnQI69B4AswYI1IGBA",
+          "https://sf6-cdn-tos.douyinstatic.com/obj/tos-cn-ve-2774/o8BkrixQYMzZ4iMWmoifjnQI69B4AswYI1IGBA",
+        ],
+      },
+    },
+  })
+  assert.equal(url, "https://sf11-cdn-tos.douyinstatic.com/obj/tos-cn-ve-2774/o8BkrixQYMzZ4iMWmoifjnQI69B4AswYI1IGBA")
+})
+
+test("音乐容器类型：ID3 与 MPEG 帧头识别为 mp3，ftyp 盒识别为 m4a", () => {
+  assert.equal(musicFileExtension(Buffer.from("49443304000000000000", "hex")), "mp3")
+  assert.equal(musicFileExtension(Buffer.from("fffb9004000000000000", "hex")), "mp3")
+  assert.equal(musicFileExtension(Buffer.from("0000001c667479704d344120", "hex")), "m4a")
+  assert.equal(musicFileExtension(Buffer.alloc(0)), "mp3")
 })
 
 test("音乐详情请求地址：携带音乐编号", () => {

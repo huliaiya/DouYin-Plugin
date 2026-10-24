@@ -45,6 +45,7 @@ import {
   fetchVideoUrlsFromApi,
   formatComments,
   formatShareMeta,
+  musicFileExtension,
   pickImageUrls,
   pickShareMeta,
   pickVideoUrls,
@@ -1897,17 +1898,18 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  // 背景音乐直接发文件（mp3），失败只记日志，不影响原片回传
+  // 背景音乐直接发文件（mp3/m4a），失败只记日志，不影响原片回传
   async sendShareMusic(id, data, musicUrl, detail) {
     if (config.bot.shareVideoMusic === false) return
     if (!musicUrl) return
     try {
       const buf = await downloadMusic(musicUrl)
-      const title = String(detail?.music?.title || "").trim()
-      const name = title ? `${title.slice(0, 40)}.mp3` : "douyin-music.mp3"
+      const ext = musicFileExtension(buf)
+      const title = String(detail?.music?.title || "").trim().replace(/[\\/:*?"<>|]/g, "_").slice(0, 40)
+      const name = title ? `${title}.${ext}` : `douyin-music.${ext}`
       const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "file", file: { source: buf, name } })
       if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
-      Bot.makeLog("info", `背景音乐已回传（${buf.length}B）`, id)
+      Bot.makeLog("info", `背景音乐已回传（${buf.length}B，${ext}）`, id)
     } catch (err) {
       Bot.makeLog("warn", [`背景音乐回传失败：${err?.message || err}`, musicUrl], id)
     }
