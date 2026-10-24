@@ -3,10 +3,16 @@ import assert from "node:assert/strict"
 import {
   buildApiQuery,
   buildItemInfoUrl,
+  buildMusicDetailUrl,
   fetchItemInfoDetail,
+  fetchItemInfoDetailAuto,
+  fetchMusicUrl,
   fetchVideoUrlsFromApi,
   pickImageUrls,
+  pickMusicUrl,
   pickVideoUrls,
+  registerAnonymousTtwid,
+  resetTtwidCache,
 } from "../lib/share-video.js"
 
 test("作品详情请求地址：web 指纹参数与作品编号", () => {
@@ -96,6 +102,18 @@ test("播放地址容错：详情为空或字段缺失", () => {
   assert.deepEqual(pickVideoUrls({ video: { play_addr: { url_list: ["not-a-url"] } } }), [])
 })
 
+test("播放地址容错：图文作品的背景音乐地址被过滤", () => {
+  const urls = pickVideoUrls({
+    video: {
+      play_addr: {
+        uri: "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3",
+        url_list: ["https://aweme.snssdk.com/aweme/v1/playwm/?video_id=https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3"],
+      },
+    },
+  })
+  assert.deepEqual(urls, [])
+})
+
 test("解析服务查询串拼接", () => {
   assert.equal(
     buildApiQuery("https://api.huliaiya.icu/API/douyin.php", "7699765354280520969"),
@@ -111,16 +129,119 @@ test("解析服务查询串拼接", () => {
   )
 })
 
+test("背景音乐地址：取 music.play_url 首个音乐直链", () => {
+  const url = pickMusicUrl({
+    music: {
+      title: "小城夏天",
+      play_url: {
+        url_list: [
+          "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3",
+          "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3",
+        ],
+      },
+    },
+  })
+  assert.equal(url, "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3")
+})
+
+test("背景音乐地址：图文作品回退 video.play_addr 的音乐地址", () => {
+  const url = pickMusicUrl({
+    video: {
+      play_addr: {
+        uri: "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3",
+      },
+    },
+  })
+  assert.equal(url, "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/7698640096186354441.mp3")
+})
+
+test("背景音乐地址：普通视频作品没有音乐时返回空", () => {
+  const url = pickMusicUrl({
+    video: {
+      play_addr: {
+        uri: "v2800fgi0000dbe1fdfog65vnogddtgg",
+        url_list: ["https://aweme.snssdk.com/aweme/v1/play/?video_id=v2800fgi0000dbe1fdfog65vnogddtgg"],
+      },
+    },
+  })
+  assert.equal(url, "")
+})
+
+test("音乐详情请求地址：携带音乐编号", () => {
+  const url = new URL(buildMusicDetailUrl("7700055525899143990"))
+  assert.equal(url.host, "www.douyin.com")
+  assert.equal(url.pathname, "/aweme/v1/music/detail/")
+  assert.equal(url.searchParams.get("music_id"), "7700055525899143990")
+  assert.equal(url.searchParams.get("aid"), "6383")
+})
+
+test("背景音乐地址：详情缺失时按音乐 mid 查询音乐详情接口", async () => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options })
+    return new Response(
+      JSON.stringify({
+        status_code: 0,
+        music_info: {
+          title: "原声",
+          play_url: { uri: "", url_list: [] },
+          extra: JSON.stringify({ original_song_url: "https://sf26-sign.douyinstatic.com/ies-music-hj/7700055571198167867.mp3?x-expires=1" }),
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )
+  }
+  try {
+    const url = await fetchMusicUrl({ music: { mid: "7700055525899143990", play_url: { url_list: [] } } })
+    assert.equal(url, "https://sf26-sign.douyinstatic.com/ies-music-hj/7700055571198167867.mp3?x-expires=1")
+    assert.equal(calls.length, 1)
+    assert.match(calls[0].url, /music_id=7700055525899143990/)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("背景音乐地址：详情自带地址时不再请求音乐详情接口", async () => {
+  const originalFetch = globalThis.fetch
+  let called = 0
+  globalThis.fetch = async () => {
+    called++
+    return new Response("{}", { status: 200 })
+  }
+  try {
+    const url = await fetchMusicUrl({
+      music: { play_url: { url_list: ["https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/1.mp3"] } },
+    })
+    assert.equal(url, "https://sf6-cdn-tos.douyinstatic.com/obj/ies-music/1.mp3")
+    assert.equal(called, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("背景音乐地址：详情与音乐编号都缺失时返回空", async () => {
+  assert.equal(await fetchMusicUrl({}), "")
+  assert.equal(await fetchMusicUrl(null), "")
+})
+
 test("解析服务调用：POST 携带账号 cookie，失败回退 GET", async () => {
   const originalFetch = globalThis.fetch
   const calls = []
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options })
     if (options.method === "POST") {
-      return new Response(JSON.stringify({ code: 0, video_url: "https://cdn.example/a.mp4" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          video_url: "https://cdn.example/a.mp4",
+          music_url: "https://cdn.example/b.mp3",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      )
     }
     return new Response(JSON.stringify({ code: 0, urls: ["https://cdn.example/b.mp4"] }), {
       status: 200,
@@ -135,6 +256,7 @@ test("解析服务调用：POST 携带账号 cookie，失败回退 GET", async (
     })
     assert.deepEqual(result.urls, ["https://cdn.example/a.mp4"])
     assert.deepEqual(result.images, [])
+    assert.equal(result.music, "https://cdn.example/b.mp3")
     assert.equal(calls.length, 1)
     assert.equal(calls[0].options.method, "POST")
     const body = JSON.parse(calls[0].options.body)
@@ -168,5 +290,126 @@ test("解析服务调用：POST 异常时回退 GET 且不带 cookie", async () 
     assert.ok(calls[1].url.includes("url=123"))
   } finally {
     globalThis.fetch = originalFetch
+  }
+})
+
+test("匿名 ttwid 注册：解析 set-cookie", async () => {
+  resetTtwidCache()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options })
+    return new Response("{}", { status: 200, headers: { "Set-Cookie": "ttwid=tt-123; Path=/" } })
+  }
+  try {
+    const value = await registerAnonymousTtwid()
+    assert.equal(value, "tt-123")
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].options.method, "POST")
+    assert.ok(calls[0].url.includes("ttwid.bytedance.com/ttwid/union/register/"))
+  } finally {
+    globalThis.fetch = originalFetch
+    resetTtwidCache()
+  }
+})
+
+test("作品详情自动解析：网页 cookie 可用时直接命中", async () => {
+  resetTtwidCache()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options })
+    return new Response(JSON.stringify({ status_code: 0, item_list: [{ aweme_id: "123", aweme_type: 4 }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  try {
+    const detail = await fetchItemInfoDetailAuto("123", "sessionid=abc")
+    assert.equal(detail.aweme_id, "123")
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].options.headers.Cookie, "sessionid=abc")
+  } finally {
+    globalThis.fetch = originalFetch
+    resetTtwidCache()
+  }
+})
+
+test("作品详情自动解析：网页 cookie 失效时回退匿名 ttwid", async () => {
+  resetTtwidCache()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options })
+    if (String(url).includes("ttwid.bytedance.com")) {
+      return new Response("{}", { status: 200, headers: { "Set-Cookie": "ttwid=tt-456; Path=/" } })
+    }
+    const cookie = options.headers?.Cookie ?? ""
+    if (cookie.includes("ttwid=")) {
+      return new Response(JSON.stringify({ status_code: 0, item_list: [{ aweme_id: "123", aweme_type: 2 }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+    return new Response(JSON.stringify({ status_code: 8, status_msg: "用户未登录" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  try {
+    const detail = await fetchItemInfoDetailAuto("123", "sessionid=abc")
+    assert.equal(detail.aweme_id, "123")
+    assert.equal(calls.length, 3)
+    assert.equal(calls[1].options.method, "POST")
+    assert.equal(calls[2].options.headers.Cookie, "ttwid=tt-456")
+  } finally {
+    globalThis.fetch = originalFetch
+    resetTtwidCache()
+  }
+})
+
+test("作品详情自动解析：无 cookie 时直接用匿名 ttwid", async () => {
+  resetTtwidCache()
+  const originalFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options })
+    if (String(url).includes("ttwid.bytedance.com")) {
+      return new Response("{}", { status: 200, headers: { "Set-Cookie": "ttwid=tt-789; Path=/" } })
+    }
+    return new Response(JSON.stringify({ status_code: 0, item_list: [{ aweme_id: "456", aweme_type: 4 }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  try {
+    const detail = await fetchItemInfoDetailAuto("456")
+    assert.equal(detail.aweme_id, "456")
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].options.method, "POST")
+    assert.equal(calls[1].options.headers.Cookie, "ttwid=tt-789")
+  } finally {
+    globalThis.fetch = originalFetch
+    resetTtwidCache()
+  }
+})
+
+test("作品详情自动解析：两条来源都失败时抛出合并错误", async () => {
+  resetTtwidCache()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async url => {
+    if (String(url).includes("ttwid.bytedance.com")) {
+      return new Response("{}", { status: 200, headers: { "Set-Cookie": "ttwid=tt-000; Path=/" } })
+    }
+    return new Response(JSON.stringify({ status_code: 8, status_msg: "用户未登录" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  try {
+    await assert.rejects(() => fetchItemInfoDetailAuto("123", "sessionid=abc"), /网页 cookie.*匿名 ttwid/s)
+  } finally {
+    globalThis.fetch = originalFetch
+    resetTtwidCache()
   }
 })

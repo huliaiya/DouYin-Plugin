@@ -36,9 +36,11 @@ import { parseCookieInput, hasCookiePairs, resolveWebAccount } from "./lib/cooki
 import { isLoginRiskError, isSessionLostError, loginRiskHint, sessionLostHint } from "./lib/login-error.js"
 import {
   downloadImage,
+  downloadMusic,
   downloadVideo,
   fetchAppAwemeDetail,
-  fetchItemInfoDetail,
+  fetchItemInfoDetailAuto,
+  fetchMusicUrl,
   fetchVideoUrlsFromApi,
   pickImageUrls,
   pickVideoUrls,
@@ -1712,14 +1714,17 @@ const adapter = new (class DouYinAdapter {
     if (!uploader || typeof originalCredentials !== "function") return
 
     const saved = this.loadUploadCred(id)
-    const cache = { credentials: saved?.accessKeyId ? saved : null, at: saved?.at ?? 0 }
+    // 凭据按 configKey 分开缓存：图片走 public_image_config，文件走 public_file_config，两者不可混用
+    const cache = new Map()
+    if (saved?.accessKeyId) cache.set("public_image_config", { credentials: saved, at: saved.at ?? 0 })
     const TTL = 30 * 60 * 1000
     uploader.credentials = async (...args) => {
-      if (cache.credentials && Date.now() - cache.at < TTL) return cache.credentials
+      const configKey = args[0] ?? "public_image_config"
+      const hit = cache.get(configKey)
+      if (hit && Date.now() - hit.at < TTL) return hit.credentials
       const credentials = await originalCredentials(...args)
-      cache.credentials = credentials
-      cache.at = Date.now()
-      this.saveUploadCred(id, credentials)
+      cache.set(configKey, { credentials, at: Date.now() })
+      if (configKey === "public_image_config") this.saveUploadCred(id, credentials)
       return credentials
     }
 
@@ -1757,7 +1762,8 @@ const adapter = new (class DouYinAdapter {
     return Bot[id]?.getCookies?.() || ""
   }
 
-  // 分享作品原片回传：专用网页 cookie 走 iteminfo 详情接口，其次外部解析服务，最后账号 cookie 与 App 兜底
+  // 分享作品原片回传：作品详情优先走 iteminfo（网页 cookie 失效时用匿名 ttwid），
+  // 其次外部解析服务，最后 SDK 与 App 兜底
   async replyShareVideo(id, data, msg) {
     const itemId = msg?.share?.itemId
     if (!itemId) return
@@ -1766,15 +1772,15 @@ const adapter = new (class DouYinAdapter {
     let detail = null
     let imageUrls = []
     let videoUrls = []
-    if (parseCookie) {
-      try {
-        detail = await fetchItemInfoDetail(itemId, parseCookie)
-        videoUrls = pickVideoUrls(detail)
-        imageUrls = pickImageUrls(detail)
-        Bot.makeLog("info", `作品详情解析成功（视频 ${videoUrls.length} 个地址，图片 ${imageUrls.length} 张）`, id)
-      } catch (err) {
-        Bot.makeLog("warn", [`网页 cookie 解析作品详情失败：${err?.message || err}`, itemId], id)
-      }
+    let musicUrl = ""
+    try {
+      detail = await fetchItemInfoDetailAuto(itemId, parseCookie)
+      videoUrls = pickVideoUrls(detail)
+      imageUrls = pickImageUrls(detail)
+      musicUrl = await this.resolveShareMusic(id, detail, parseCookie)
+      Bot.makeLog("info", `作品详情解析成功（视频 ${videoUrls.length} 个地址，图片 ${imageUrls.length} 张）`, id)
+    } catch (err) {
+      Bot.makeLog("warn", [`作品详情解析失败：${err?.message || err}`, itemId], id)
     }
     const api = config.bot.shareVideoApi
     if (!detail && api) {
@@ -1786,6 +1792,7 @@ const adapter = new (class DouYinAdapter {
         })
         videoUrls.push(...result.urls)
         imageUrls.push(...result.images)
+        if (!musicUrl) musicUrl = result.music || ""
         Bot.makeLog("info", `解析服务 ${api} 返回 ${videoUrls.length} 个视频地址、${imageUrls.length} 张图片`, id)
       } catch (err) {
         Bot.makeLog("warn", [`解析服务 ${api} 调用失败，回退内置解析`, err], id)
@@ -1806,6 +1813,7 @@ const adapter = new (class DouYinAdapter {
       }
       videoUrls.push(...pickVideoUrls(detail))
       imageUrls.push(...pickImageUrls(detail))
+      if (!musicUrl) musicUrl = await this.resolveShareMusic(id, detail, parseCookie)
     }
     if (imageUrls.length) {
       for (const url of imageUrls.slice(0, 9)) {
@@ -1820,6 +1828,7 @@ const adapter = new (class DouYinAdapter {
         if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
         Bot.makeLog("info", `分享作品图片已回传（${buf.length}B）`, id)
       }
+      await this.sendShareMusic(id, data, musicUrl, detail)
       return
     }
     let buf = null
@@ -1835,6 +1844,34 @@ const adapter = new (class DouYinAdapter {
     const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "video", video: { source: buf } })
     if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
     Bot.makeLog("info", `分享作品原片已回传（${buf.length}B）`, id)
+    await this.sendShareMusic(id, data, musicUrl, detail)
+  }
+
+  // 背景音乐直链：作品详情自带地址优先，缺失时按音乐 mid 查询音乐详情接口
+  async resolveShareMusic(id, detail, parseCookie) {
+    if (!detail) return ""
+    try {
+      return await fetchMusicUrl(detail, { cookie: parseCookie })
+    } catch (err) {
+      Bot.makeLog("debug", ["背景音乐地址获取失败", err], id)
+      return ""
+    }
+  }
+
+  // 背景音乐直接发文件（mp3），失败只记日志，不影响原片回传
+  async sendShareMusic(id, data, musicUrl, detail) {
+    if (config.bot.shareVideoMusic === false) return
+    if (!musicUrl) return
+    try {
+      const buf = await downloadMusic(musicUrl)
+      const title = String(detail?.music?.title || "").trim()
+      const name = title ? `${title.slice(0, 40)}.mp3` : "douyin-music.mp3"
+      const ret = await Bot[id].sdk.msg.send(data.chatId, { type: "file", file: { source: buf, name } })
+      if (ret.statusCode) throw new Error(`发送被拒：statusCode=${ret.statusCode} ${ret.statusMsg || ""}`)
+      Bot.makeLog("info", `背景音乐已回传（${buf.length}B）`, id)
+    } catch (err) {
+      Bot.makeLog("warn", [`背景音乐回传失败：${err?.message || err}`, musicUrl], id)
+    }
   }
 
   async connect(token) {

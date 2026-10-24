@@ -103,9 +103,10 @@ cookie 属于敏感凭据：聊天指令会把 cookie 原文写进云崽日志�
 - `bot.autoRead` 收到消息后自动标记已读（对方可见已读回执）
 - `bot.activeStatus` 上报在线状态（对方可见在线）
 - `bot.shareVideoReply` 收到抖音分享作品时自动回传原片，默认开启。视频作品回传无水印 mp4，图文作品回传原图
-- `bot.shareVideoApi` 分享作品解析服务地址，默认 `https://api.huliaiya.icu/API/douyin.php`；置空则使用插件内置解析。接口约定：优先 `POST {地址}` body `{"url":作品ID,"cookie":账号Cookie,"parse_cookie":网页Cookie,"token":访问令牌,"type":"json"}`，失败时回退 `GET {地址}?url={作品ID}&type=json`；返回 `{code:0, video_url, urls[], images[]}`。插件会把当前账号的 Cookie 与网页 Cookie 随 POST 请求发送给该解析服务，解析服务无需自行保存 Cookie
+- `bot.shareVideoMusic` 回传原片或图片时附带作品背景音乐（mp3 文件），默认开启；关闭后只发原片
+- `bot.shareVideoApi` 分享作品解析服务地址，默认 `https://api.huliaiya.icu/API/douyin.php`；置空则使用插件内置解析。接口约定：优先 `POST {地址}` body `{"url":作品ID,"cookie":账号Cookie,"parse_cookie":网页Cookie,"token":访问令牌,"type":"json"}`，失败时回退 `GET {地址}?url={作品ID}&type=json`；返回 `{code:0, video_url, urls[], images[], music_url}`。插件会把当前账号的 Cookie 与网页 Cookie 随 POST 请求发送给该解析服务，解析服务无需自行保存 Cookie
 - `bot.shareVideoApiToken` 解析服务访问令牌，接口侧启用令牌校验时填写
-- `bot.shareVideoCookie` 专用的抖音网页 Cookie。抖音桌面端 IM 登录会使同一 cookie 的网页会话失效（接口探测返回 `status_code 8`），解析原片需要一个只在浏览器使用的网页 Cookie；填写后插件优先用该 Cookie 直连作品详情接口
+- `bot.shareVideoCookie` 专用的抖音网页 Cookie。抖音桌面端 IM 登录会使同一 cookie 的网页会话失效（接口探测返回 `status_code 8`），填写后插件优先用该 Cookie 直连作品详情接口；留空或该 Cookie 失效时，插件自动注册匿名访客标识（ttwid）继续解析，无需任何登录态
 - `token` 账号列表，格式 `uid:cookie`
 - `accountEnabled` 账号启用状态映射，值为 `false` 的 UID 处于停用状态（默认全部启用，只记录停用项）
 - `mediaHostAllowlist` 媒体下载域名白名单的附加后缀，默认空（仅放行抖音官方 CDN 域名）

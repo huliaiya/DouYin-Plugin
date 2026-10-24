@@ -100,6 +100,12 @@ const SCHEMAS = [
     component: "Switch",
   },
   {
+    field: "bot.shareVideoMusic",
+    label: "附带背景音乐",
+    bottomHelpMessage: "回传原片或图片时，额外把作品背景音乐以 mp3 文件发出",
+    component: "Switch",
+  },
+  {
     field: "bot.shareVideoCookie",
     label: "解析用网页 Cookie",
     bottomHelpMessage:
